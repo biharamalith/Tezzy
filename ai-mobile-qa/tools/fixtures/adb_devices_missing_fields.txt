@@ -1,0 +1,3 @@
+List of devices attached
+FAKE12345 unauthorized
+R58M123ABC device model:SM_G998U1

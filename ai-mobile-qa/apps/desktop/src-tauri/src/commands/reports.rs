@@ -1,0 +1,80 @@
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tauri::AppHandle;
+
+use crate::core::events::{emit_log, LogLevel};
+use crate::core::storage::request_smoke_stop;
+use crate::explorer::agent_loop::{run_smoke_check, SmokeCheckResult};
+
+/// Default maximum number of steps for a smoke check run.
+const DEFAULT_MAX_STEPS: u32 = 20;
+
+/// Default per-step wait time in milliseconds.
+const DEFAULT_STEP_DELAY_MS: u64 = 1500;
+
+/// Maximum allowed steps to prevent unbounded runs.
+const MAX_STEPS_LIMIT: u32 = 50;
+
+/// Minimum per-step delay to avoid hammering the device (milliseconds).
+const MIN_STEP_DELAY_MS: u64 = 500;
+
+/// Starts a heuristic auto smoke check run against the active device.
+///
+/// ## Parameters
+/// - `max_steps`: How many taps to attempt before stopping. Clamped to [1, 50].
+/// - `per_step_delay_ms`: Milliseconds to wait between tap and next dump. Clamped to [500, 10000].
+///
+/// ## Security
+/// - `max_steps` and `per_step_delay_ms` are numeric — no path or injection risk.
+/// - Screenshot output directory is derived from `app_local_data_dir` — system-controlled.
+/// - No user-supplied strings reach the file system.
+///
+/// ## Complexity
+/// O(max_steps × n_elements_per_screen). Typically < 50 steps × 500 elements = 25 000 ops.
+#[tauri::command]
+pub async fn run_smoke_check_cmd(
+	app: AppHandle,
+	max_steps: Option<u32>,
+	per_step_delay_ms: Option<u64>,
+) -> Result<SmokeCheckResult, String> {
+	let steps = max_steps
+		.unwrap_or(DEFAULT_MAX_STEPS)
+		.clamp(1, MAX_STEPS_LIMIT);
+
+	let delay = per_step_delay_ms
+		.unwrap_or(DEFAULT_STEP_DELAY_MS)
+		.clamp(MIN_STEP_DELAY_MS, 10_000);
+
+	emit_log(
+		&app,
+		LogLevel::Info,
+		format!("[command] Starting smoke check: {} steps, {} ms delay", steps, delay),
+	)
+	.ok();
+
+	// Build a unique run identifier
+	let ts = SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.map(|d| d.as_millis())
+		.unwrap_or(0);
+	let run_id = format!("smoke-{}", ts);
+
+	// Screenshots for this run go under <app_local_data>/smoke-screenshots/
+	let base_dir = app
+		.path_resolver()
+		.app_local_data_dir()
+		.unwrap_or_else(|| PathBuf::from("reports"));
+	let screenshots_dir = base_dir.join("smoke-screenshots");
+
+	run_smoke_check(&app, steps, delay, screenshots_dir, run_id).await
+}
+
+/// Signals a running smoke check to stop after the current step.
+///
+/// This is a best-effort, non-blocking call — the running loop checks the flag
+/// at the start of each step.
+#[tauri::command]
+pub fn stop_smoke_check_cmd() {
+	request_smoke_stop();
+}
