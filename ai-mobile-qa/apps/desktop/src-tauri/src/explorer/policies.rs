@@ -40,14 +40,18 @@ pub fn elem_key(el: &UiElement) -> String {
 
 /// Selects the best candidate element to tap next, using a three-pass heuristic.
 ///
-/// **Pass 1** — Clickable, enabled node whose text or content-desc contains a
+/// **Pass 1** — Interactive, enabled node whose text or content-desc contains a
 ///   priority label (case-insensitive). Preferring known action words means we
 ///   navigate real flows rather than dismissing random taps.
 ///
-/// **Pass 2** — Any clickable, enabled node with a non-empty label (text or
+/// **Pass 2** — Any interactive, enabled node with a non-empty label (text or
 ///   content-desc) that has not been tapped yet.
 ///
-/// **Pass 3** — Any clickable, enabled node not yet tapped (may be unlabelled).
+/// **Pass 3** — Any interactive, enabled node not yet tapped (may be unlabelled).
+///
+/// **Pass 4** — Any enabled, unseen node with a useful label, even if it is not
+/// explicitly marked interactive. Some Android views omit clickable flags but still
+/// react to center taps through parent delegation.
 ///
 /// Returns `None` if no interactable node exists on the current screen.
 ///
@@ -58,26 +62,41 @@ pub fn select_candidate<'a>(
 	elements: &'a [UiElement],
 	seen_ids: &HashSet<String>,
 ) -> Option<&'a UiElement> {
-	let unseen_clickable: Vec<&UiElement> = elements
+	let unseen_interactive: Vec<&UiElement> = elements
 		.iter()
-		.filter(|el| el.clickable && el.enabled && !seen_ids.contains(&elem_key(el)))
+		.filter(|el| {
+			let interactive = el.clickable || el.scrollable || el.checkable;
+			interactive && el.enabled && !seen_ids.contains(&elem_key(el))
+		})
 		.collect();
 
 	// Pass 1 – priority label
-	for el in &unseen_clickable {
+	for el in &unseen_interactive {
 		let haystack = format!("{} {}", el.text, el.content_desc).to_lowercase();
 		if PRIORITY_LABELS.iter().any(|&p| haystack.contains(p)) {
 			return Some(el);
 		}
 	}
 
-	// Pass 2 – any labelled clickable
-	for el in &unseen_clickable {
+	// Pass 2 – any labelled interactive
+	for el in &unseen_interactive {
 		if !el.text.is_empty() || !el.content_desc.is_empty() {
 			return Some(el);
 		}
 	}
 
-	// Pass 3 – any clickable
-	unseen_clickable.into_iter().next()
+	// Pass 3 – any interactive
+	if let Some(candidate) = unseen_interactive.into_iter().next() {
+		return Some(candidate);
+	}
+
+	// Pass 4 – fallback to labelled enabled nodes (non-interactive)
+	elements
+		.iter()
+		.filter(|el| {
+			el.enabled
+				&& !seen_ids.contains(&elem_key(el))
+				&& (!el.text.is_empty() || !el.content_desc.is_empty() || !el.resource_id.is_empty())
+		})
+		.next()
 }

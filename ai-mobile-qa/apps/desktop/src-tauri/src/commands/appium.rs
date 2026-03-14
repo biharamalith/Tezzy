@@ -91,15 +91,40 @@ pub async fn create_appium_session(
 pub async fn destroy_appium_session(app: AppHandle) -> Result<String, String> {
 	emit_log(&app, LogLevel::Info, "[command] Destroying Appium session").ok();
 
-	let session = get_active_session().ok_or_else(|| "No active session".to_string())?;
+	let Some(session) = get_active_session() else {
+		emit_session_state(&app, "none", None, None, Some("No active session".to_string())).ok();
+		return Ok("No active session".to_string());
+	};
 
-	appium_client::delete_session(&app, &session.session_id, None).await?;
+	let remote_delete = appium_client::delete_session(&app, &session.session_id, None).await;
 
+	// Always clear local state so the UI can recover even when Appium already
+	// dropped the session (common after app crash / server restart).
 	set_active_session(None)?;
 
-	emit_session_state(&app, "none", None, None, Some("Session destroyed".to_string())).ok();
-
-	Ok("Session destroyed".to_string())
+	match remote_delete {
+		Ok(()) => {
+			emit_session_state(&app, "none", None, None, Some("Session destroyed".to_string())).ok();
+			Ok("Session destroyed".to_string())
+		}
+		Err(e) => {
+			emit_log(
+				&app,
+				LogLevel::Warn,
+				format!("[appium-client] Remote session delete failed; cleared local session: {}", e),
+			)
+			.ok();
+			emit_session_state(
+				&app,
+				"none",
+				None,
+				None,
+				Some("Session cleared locally (remote session already ended)".to_string()),
+			)
+			.ok();
+			Ok("Session cleared locally".to_string())
+		}
+	}
 }
 
 /// Performs tap action at coordinates.

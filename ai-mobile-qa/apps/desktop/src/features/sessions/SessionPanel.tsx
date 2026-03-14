@@ -96,7 +96,15 @@ export default function SessionPanel({ prefillTap, onPrefillConsumed }: Props) {
 
     const run = async (fn: () => Promise<unknown>) => {
         setLoading(true);
-        try { await fn(); } catch (err) { console.error(err); } finally { setLoading(false); }
+        try {
+            await fn();
+        } catch (err) {
+            const msg = String(err);
+            setSessionError(msg);
+            console.error(err);
+        } finally {
+            setLoading(false);
+        }
     };
 
     const serverColor =
@@ -272,7 +280,10 @@ export default function SessionPanel({ prefillTap, onPrefillConsumed }: Props) {
                             <span style={{ fontSize: "11px", color: "#3FB950", fontWeight: 600 }}>Session active</span>
                         </div>
                         <button
-                            onClick={() => run(invokeDestroySession)}
+                            onClick={() => {
+                                setSessionError(null);
+                                run(invokeDestroySession);
+                            }}
                             disabled={loading}
                             style={{
                                 border: "1px solid rgba(248,81,73,0.2)", background: "rgba(248,81,73,0.07)",

@@ -10,7 +10,7 @@ use crate::core::storage::{
 	clear_smoke_stop, get_active_device, get_active_session, is_smoke_stop_requested,
 };
 use crate::drivers::appium_client;
-use crate::drivers::uihierarchy::parse_elements;
+use crate::drivers::uihierarchy::{dump_hierarchy, get_screen_size, parse_elements};
 use crate::explorer::policies::{elem_key, select_candidate};
 use crate::explorer::scoring::screen_hash;
 
@@ -130,6 +130,9 @@ pub async fn run_smoke_check(
 	let mut hash_counts: HashMap<String, u32> = HashMap::new();
 	let mut final_status = "complete".to_string();
 	let mut step_num: u32 = 0;
+	let mut no_elements_streak: u32 = 0;
+
+	let (screen_w, screen_h) = get_screen_size(&serial).await.unwrap_or((1080, 1920));
 
 	// ── Step loop ─────────────────────────────────────────────────────────
 	while step_num < max_steps {
@@ -147,7 +150,20 @@ pub async fn run_smoke_check(
 		// Smoke check always runs with an active Appium session, so we use
 		// get_page_source directly — no adb round-trip, typically < 2 seconds.
 		let elements = match appium_client::get_page_source(&session.session_id, None).await {
-			Ok(xml) => parse_elements(&xml),
+			Ok(xml) => {
+				let parsed = parse_elements(&xml);
+				if parsed.is_empty() {
+					emit_log(
+						app,
+						LogLevel::Debug,
+						"[smoke] Appium source parsed to 0 elements, falling back to adb dump",
+					)
+					.ok();
+					dump_hierarchy(app, &serial).await.unwrap_or_default()
+				} else {
+					parsed
+				}
+			}
 			Err(e) => {
 				// A failed dump after a tap is a strong crash signal.
 				let msg = format!("UI dump failed at step {}: {}", step_num, e);
@@ -200,24 +216,64 @@ pub async fn run_smoke_check(
 		let candidate = match select_candidate(&elements, &seen_keys) {
 			Some(c) => c,
 			None => {
+				no_elements_streak += 1;
 				emit_log(
 					app,
 					LogLevel::Info,
 					format!("[smoke] Step {}: no interactable elements found", step_num),
 				)
 				.ok();
+
+				let swipe_x = screen_w / 2;
+				let swipe_y1 = (screen_h as f32 * 0.75) as i32;
+				let swipe_y2 = (screen_h as f32 * 0.25) as i32;
+				let swipe_action = "fallback_swipe".to_string();
+
 				emit_run_progress(
-					app, step_num, max_steps, "no_elements", "warn", None,
+					app, step_num, max_steps, &swipe_action, "warn", None,
 				)
 				.ok();
+
+				let _ = appium_client::swipe(
+					app,
+					&session.session_id,
+					swipe_x,
+					swipe_y1,
+					swipe_x,
+					swipe_y2,
+					600,
+					None,
+				)
+				.await;
+
+				if per_step_delay_ms > 0 {
+					tokio::time::sleep(Duration::from_millis(per_step_delay_ms)).await;
+				}
+
+				let screenshot_filename = format!("step-{:03}-no_elements.png", step_num);
+				let screenshot_path = smoke_dir.join(&screenshot_filename);
+				let saved_screenshot = appium_client::screenshot(
+					app,
+					&session.session_id,
+					&screenshot_path,
+					None,
+				)
+				.await
+				.ok();
+
 				steps.push(SmokeStepRecord {
 					step_num,
 					action: "no_elements".to_string(),
 					result_status: "warn".to_string(),
-					screenshot: None,
+					screenshot: saved_screenshot,
 				});
-				final_status = "no_elements".to_string();
-				break;
+
+				if no_elements_streak >= 3 {
+					final_status = "no_elements".to_string();
+					break;
+				}
+
+				continue;
 			}
 		};
 
@@ -307,10 +363,23 @@ pub async fn run_smoke_check(
 		.ok();
 
 		// — 8. Re-read hierarchy and compare hash ————————————————————————
-		let post_elements = appium_client::get_page_source(&session.session_id, None)
-			.await
-			.map(|xml| parse_elements(&xml))
-			.unwrap_or_default();
+		let post_elements = match appium_client::get_page_source(&session.session_id, None).await {
+			Ok(xml) => {
+				let parsed = parse_elements(&xml);
+				if parsed.is_empty() {
+					emit_log(
+						app,
+						LogLevel::Debug,
+						"[smoke] Post-tap Appium source parsed to 0 elements, falling back to adb dump",
+					)
+					.ok();
+					dump_hierarchy(app, &serial).await.unwrap_or_default()
+				} else {
+					parsed
+				}
+			}
+			Err(_) => dump_hierarchy(app, &serial).await.unwrap_or_default(),
+		};
 		let post_hash = screen_hash(&post_elements);
 
 		let (result_status, finding) = if post_hash == current_hash {
