@@ -6,12 +6,21 @@ use crate::core::events::{emit_log, LogLevel};
 use crate::core::storage::{get_active_device, get_active_session};
 use crate::drivers::appium_client::{self, is_session_alive}; // ← added is_session_alive
 use crate::drivers::uihierarchy::{dump_hierarchy, get_screen_size, parse_ui_xml, UiElement};
+use crate::explorer::scoring::screen_hash;
 
 /// Screen dimensions returned by `get_device_screen_size`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScreenSize {
     pub width: i32,
     pub height: i32,
+}
+
+/// Full UI snapshot for AI orchestration.
+#[derive(Debug, Clone, Serialize)]
+pub struct UiSnapshot {
+    pub screen_hash: String,
+    pub screen_size: ScreenSize,
+    pub ui_elements: Vec<UiElement>,
 }
 
 /// Dumps the current UI hierarchy for the active device.
@@ -81,4 +90,20 @@ pub async fn get_device_screen_size() -> Result<ScreenSize, String> {
     let serial = get_active_device().ok_or_else(|| "No active device selected".to_string())?;
     let (width, height) = get_screen_size(&serial).await?;
     Ok(ScreenSize { width, height })
+}
+
+/// Returns the current UI snapshot: elements + `screen_hash` + `screen_size`.
+///
+/// This is a convenience wrapper used by the AI engine orchestrator client.
+#[tauri::command]
+pub async fn get_ui_snapshot(app: AppHandle) -> Result<UiSnapshot, String> {
+    let serial = get_active_device().ok_or_else(|| "No active device selected".to_string())?;
+    let ui_elements = get_ui_hierarchy_inner(app.clone()).await?;
+    let hash = screen_hash(&ui_elements);
+    let (width, height) = get_screen_size(&serial).await?;
+    Ok(UiSnapshot {
+        screen_hash: hash,
+        screen_size: ScreenSize { width, height },
+        ui_elements,
+    })
 }

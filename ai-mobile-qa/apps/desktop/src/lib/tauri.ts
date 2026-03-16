@@ -213,6 +213,16 @@ export async function invokeGetDeviceScreenSize(): Promise<ScreenSize> {
     return invoke<ScreenSize>("get_device_screen_size");
 }
 
+export type UiSnapshot = {
+    screen_hash: string;
+    screen_size: ScreenSize;
+    ui_elements: UiElement[];
+};
+
+export async function invokeGetUiSnapshot(): Promise<UiSnapshot> {
+    return invoke<UiSnapshot>("get_ui_snapshot");
+}
+
 // ── Smoke Check ──────────────────────────────────────────────────────────────
 
 export type SmokeStepRecord = {

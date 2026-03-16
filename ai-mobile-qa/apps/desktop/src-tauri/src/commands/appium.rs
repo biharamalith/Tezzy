@@ -10,6 +10,73 @@ use crate::drivers::appium_server::{
 	AppiumInstallInfo, AppiumServerStatus,
 };
 
+fn is_invalid_session_error(err: &str) -> bool {
+	let lower = err.to_lowercase();
+	lower.contains("invalid session id")
+		|| lower.contains("session is either terminated or not started")
+		|| lower.contains("nosuchdrivererror")
+}
+
+async fn recover_session(app: &AppHandle, serial: &str) -> Result<ActiveSession, String> {
+	emit_log(
+		app,
+		LogLevel::Warn,
+		format!("[appium-client] Recovering Appium session for device {}", serial),
+	)
+	.ok();
+	emit_session_state(
+		app,
+		"creating",
+		None,
+		Some(serial.to_string()),
+		Some("Recovering stale session...".to_string()),
+	)
+	.ok();
+
+	let session_response = appium_client::create_session(app, serial, None, None)
+		.await
+		.map_err(|e| format!("Session recovery failed: {}", e))?;
+
+	let recovered = ActiveSession {
+		session_id: session_response.session_id.clone(),
+		device_serial: serial.to_string(),
+		capabilities: session_response.capabilities,
+	};
+	set_active_session(Some(recovered.clone()))?;
+
+	emit_session_state(
+		app,
+		"active",
+		Some(recovered.session_id.clone()),
+		Some(serial.to_string()),
+		Some("Session recovered".to_string()),
+	)
+	.ok();
+
+	Ok(recovered)
+}
+
+async fn get_or_recover_session(app: &AppHandle) -> Result<ActiveSession, String> {
+	let Some(session) = get_active_session() else {
+		return Err("No active session".to_string());
+	};
+
+	if appium_client::is_session_alive(&session.session_id, None).await {
+		return Ok(session);
+	}
+
+	emit_log(
+		app,
+		LogLevel::Warn,
+		format!(
+			"[appium-client] Stored session {} is dead; auto-recovering",
+			session.session_id
+		),
+	)
+	.ok();
+	recover_session(app, &session.device_serial).await
+}
+
 /// Ensures Appium is installed (downloads if needed).
 #[tauri::command]
 pub async fn ensure_appium(app: AppHandle) -> Result<AppiumInstallInfo, String> {
@@ -132,9 +199,17 @@ pub async fn destroy_appium_session(app: AppHandle) -> Result<String, String> {
 pub async fn action_tap(app: AppHandle, x: i32, y: i32) -> Result<String, String> {
 	emit_log(&app, LogLevel::Info, format!("[command] Action: Tap ({}, {})", x, y)).ok();
 
-	let session = get_active_session().ok_or_else(|| "No active session".to_string())?;
+	let mut session = get_or_recover_session(&app).await?;
 
-	appium_client::tap_xy(&app, &session.session_id, x, y, None).await?;
+	if let Err(e) = appium_client::tap_xy(&app, &session.session_id, x, y, None).await {
+		if is_invalid_session_error(&e) {
+			emit_log(&app, LogLevel::Warn, format!("[command] Tap failed due to stale session; retrying once: {}", e)).ok();
+			session = recover_session(&app, &session.device_serial).await?;
+			appium_client::tap_xy(&app, &session.session_id, x, y, None).await?;
+		} else {
+			return Err(e);
+		}
+	}
 
 	Ok(format!("Tapped at ({}, {})", x, y))
 }
@@ -144,9 +219,17 @@ pub async fn action_tap(app: AppHandle, x: i32, y: i32) -> Result<String, String
 pub async fn action_back(app: AppHandle) -> Result<String, String> {
 	emit_log(&app, LogLevel::Info, "[command] Action: Back").ok();
 
-	let session = get_active_session().ok_or_else(|| "No active session".to_string())?;
+	let mut session = get_or_recover_session(&app).await?;
 
-	appium_client::back(&app, &session.session_id, None).await?;
+	if let Err(e) = appium_client::back(&app, &session.session_id, None).await {
+		if is_invalid_session_error(&e) {
+			emit_log(&app, LogLevel::Warn, format!("[command] Back failed due to stale session; retrying once: {}", e)).ok();
+			session = recover_session(&app, &session.device_serial).await?;
+			appium_client::back(&app, &session.session_id, None).await?;
+		} else {
+			return Err(e);
+		}
+	}
 
 	Ok("Back button pressed".to_string())
 }
@@ -168,9 +251,17 @@ pub async fn action_swipe(
 	)
 	.ok();
 
-	let session = get_active_session().ok_or_else(|| "No active session".to_string())?;
+	let mut session = get_or_recover_session(&app).await?;
 
-	appium_client::swipe(&app, &session.session_id, x1, y1, x2, y2, duration_ms, None).await?;
+	if let Err(e) = appium_client::swipe(&app, &session.session_id, x1, y1, x2, y2, duration_ms, None).await {
+		if is_invalid_session_error(&e) {
+			emit_log(&app, LogLevel::Warn, format!("[command] Swipe failed due to stale session; retrying once: {}", e)).ok();
+			session = recover_session(&app, &session.device_serial).await?;
+			appium_client::swipe(&app, &session.session_id, x1, y1, x2, y2, duration_ms, None).await?;
+		} else {
+			return Err(e);
+		}
+	}
 
 	Ok(format!("Swiped from ({},{}) to ({},{})", x1, y1, x2, y2))
 }
@@ -180,11 +271,45 @@ pub async fn action_swipe(
 pub async fn action_input(app: AppHandle, text: String) -> Result<String, String> {
 	emit_log(&app, LogLevel::Info, format!("[command] Action: Input '{}'", text)).ok();
 
-	let session = get_active_session().ok_or_else(|| "No active session".to_string())?;
+	let mut session = get_or_recover_session(&app).await?;
 
-	appium_client::input_text(&app, &session.session_id, &text, None).await?;
+	match appium_client::input_text(&app, &session.session_id, &text, None).await {
+		Ok(_) => Ok(format!("Input text: {}", text)),
+		Err(e) => {
+			if is_invalid_session_error(&e) {
+				emit_log(&app, LogLevel::Warn, format!("[command] Input failed due to stale session; retrying once: {}", e)).ok();
+				session = recover_session(&app, &session.device_serial).await?;
+				if appium_client::input_text(&app, &session.session_id, &text, None).await.is_ok() {
+					return Ok(format!("Input text: {}", text));
+				}
+			}
 
-	Ok(format!("Input text: {}", text))
+			emit_log(&app, LogLevel::Warn, format!("[command] Appium input_text failed: {}. Falling back to ADB.", e)).ok();
+			
+			// Fallback: ADB shell input text bypasses active element checks and "invalid element state".
+			use crate::core::process::ProcessRunner;
+			let runner = ProcessRunner::new();
+			
+			// ADB requires spaces to be `%s`.
+			let encoded_text = text.replace(' ', "%s");
+			// Safely quote for Android's sh.
+			let adb_arg = format!("'{}'", encoded_text.replace('\'', "'\\''"));
+			
+			let res = runner.run_capture("adb", &vec![
+				"-s".to_string(),
+				session.device_serial.clone(),
+				"shell".to_string(),
+				"input".to_string(),
+				"text".to_string(),
+				adb_arg
+			]).await;
+
+			match res {
+				Ok(_) => Ok(format!("Input text (via ADB): {}", text)),
+				Err(adb_err) => Err(format!("Appium failed: {} | ADB fallback failed: {}", e, adb_err.message))
+			}
+		}
+	}
 }
 
 /// Takes a screenshot and saves to artifacts.
@@ -192,7 +317,7 @@ pub async fn action_input(app: AppHandle, text: String) -> Result<String, String
 pub async fn action_screenshot(app: AppHandle) -> Result<String, String> {
 	emit_log(&app, LogLevel::Info, "[command] Action: Screenshot").ok();
 
-	let session = get_active_session().ok_or_else(|| "No active session".to_string())?;
+	let mut session = get_or_recover_session(&app).await?;
 
 	// Save to the app's local data directory (absolute, guaranteed writable)
 	let base_dir = app
@@ -210,7 +335,18 @@ pub async fn action_screenshot(app: AppHandle) -> Result<String, String> {
 	let filename = format!("screenshot-{}.png", timestamp);
 	let dest_path = screenshots_dir.join(&filename);
 
-	let saved_path = appium_client::screenshot(&app, &session.session_id, &dest_path, None).await?;
+	let saved_path = match appium_client::screenshot(&app, &session.session_id, &dest_path, None).await {
+		Ok(path) => path,
+		Err(e) => {
+			if is_invalid_session_error(&e) {
+				emit_log(&app, LogLevel::Warn, format!("[command] Screenshot failed due to stale session; retrying once: {}", e)).ok();
+				session = recover_session(&app, &session.device_serial).await?;
+				appium_client::screenshot(&app, &session.session_id, &dest_path, None).await?
+			} else {
+				return Err(e);
+			}
+		}
+	};
 
 	// Notify the UI so it can display the new screenshot immediately
 	emit_screenshot_taken(&app, &saved_path).ok();

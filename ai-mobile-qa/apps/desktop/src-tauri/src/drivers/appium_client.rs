@@ -274,7 +274,9 @@ pub async fn input_text(
 
     emit_log(app, LogLevel::Info, format!("[appium-client] Input text: {}", text)).ok();
 
-    let body = json!({ "text": text });
+    // W3C WebDriver expects `value` (array of strings). Some servers also accept `text`.
+    let value: Vec<String> = text.chars().map(|c| c.to_string()).collect();
+    let body = json!({ "text": text, "value": value });
     send_action_request(&url, &body).await?;
     Ok(())
 }
@@ -332,7 +334,7 @@ async fn send_action_request(url: &str, body: &serde_json::Value) -> Result<(), 
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(format!("Action failed [{}]: {}", status, text));
+        return Err(format!("Action failed [{}] {}: {}", status, url, text));
     }
 
     Ok(())

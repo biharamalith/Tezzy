@@ -12,6 +12,8 @@ fn main() {
 			commands::devices::env_check,
 			commands::devices::list_devices,
 			commands::devices::set_active_device,
+			commands::ai_engine::ai_session_bootstrap_cmd,
+			commands::ai_engine::ai_run_step_cmd,
 			commands::scrcpy::start_scrcpy_preview,
 			commands::scrcpy::stop_scrcpy_preview,
 			commands::scrcpy::get_scrcpy_preview_status,
@@ -29,6 +31,7 @@ fn main() {
 			commands::appium::action_screenshot,
 			commands::appium::list_screenshots,
 			commands::explorer::get_ui_hierarchy,
+			commands::explorer::get_ui_snapshot,
 			commands::explorer::get_device_screen_size,
 			commands::reports::run_smoke_check_cmd,
 			commands::reports::stop_smoke_check_cmd
