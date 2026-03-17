@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import {
     invokeStartAppium,
     invokeStopAppium,
@@ -128,12 +128,12 @@ export default function SessionPanel({ prefillTap, onPrefillConsumed }: Props) {
     };
 
     const cardStyle: React.CSSProperties = {
-        background: "#070B10", border: "1px solid #1a2030",
+        background: "#090D14", border: "1px solid #1C2333",
         borderRadius: "12px", padding: "14px 16px", marginBottom: "10px",
     };
 
     const inputStyle: React.CSSProperties = {
-        background: "#020407", border: "1px solid #1e2530",
+        background: "#060A10", border: "1px solid #1C2333",
         color: "#C9D1D9", padding: "8px 10px", borderRadius: "8px",
         fontSize: "12px", outline: "none",
     };
@@ -148,7 +148,7 @@ export default function SessionPanel({ prefillTap, onPrefillConsumed }: Props) {
     });
 
     return (
-        <div style={{ display: "flex", flexDirection: "column", padding: "18px 20px", gap: 0 }}>
+        <div style={{ display: "flex", flexDirection: "column", padding: "16px 20px", gap: 0 }}>
 
             {/* Header */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>

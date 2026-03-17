@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from openai import AsyncOpenAI
 
@@ -62,3 +62,53 @@ class LLMClient:
 			model=model,
 			timeout_s=timeout_s,
 		)
+
+	async def chat_vision_json(
+		self,
+		*,
+		system_prompt: str,
+		text_prompt: str,
+		image_b64: str,
+		temperature: float = 0.0,
+		timeout_s: float = 90.0,
+	) -> Dict[str, Any]:
+		"""Send a screenshot + text prompt to GPT-4o vision and return parsed JSON.
+
+		`image_b64` must be a raw base64-encoded PNG/JPEG string (no data-URL prefix).
+		Always uses gpt-4o regardless of the model configured in the environment,
+		because mini-class models do not support vision.
+		"""
+		messages: List[dict] = [
+			{"role": "system", "content": "Respond with json only."},
+			{"role": "system", "content": system_prompt},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "image_url",
+						"image_url": {
+							"url": f"data:image/png;base64,{image_b64}",
+							"detail": "high",
+						},
+					},
+					{"type": "text", "text": text_prompt},
+				],
+			},
+		]
+
+		resp = await self._client.chat.completions.create(
+			model="gpt-4o",  # vision is not available on mini-class models
+			temperature=temperature,
+			response_format={"type": "json_object"},
+			timeout=timeout_s,
+			messages=messages,
+		)
+
+		content = resp.choices[0].message.content
+		if not content:
+			raise ValueError("LLM returned empty vision response")
+
+		try:
+			return json.loads(content)
+		except json.JSONDecodeError as e:
+			raise ValueError(f"LLM did not return valid JSON (vision): {e}\nRaw: {content}")

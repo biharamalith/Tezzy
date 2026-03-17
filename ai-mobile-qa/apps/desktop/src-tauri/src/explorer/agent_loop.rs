@@ -2,9 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use base64::Engine as _;
 use serde::Serialize;
 use tauri::AppHandle;
 
+use crate::commands::ai_engine::vision_analyze_screenshot;
 use crate::core::events::{emit_log, emit_run_progress, LogLevel};
 use crate::core::storage::{
 	clear_smoke_stop, get_active_device, get_active_session, is_smoke_stop_requested,
@@ -361,6 +363,66 @@ pub async fn run_smoke_check(
 		)
 		.await
 		.ok();
+
+		// — 7b. Vision analysis ——————————————————————————————————————————————
+		// Read the saved PNG, re-encode to base64, and send to GPT-4o vision.
+		// This is non-fatal: if the AI engine is unreachable or the call fails,
+		// the loop continues normally without vision findings for this step.
+		if let Some(ref path_str) = saved_screenshot {
+			if let Ok(png_bytes) = std::fs::read(path_str) {
+				let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+				if let Some(vision_result) = vision_analyze_screenshot(&b64, step_num, &current_hash).await {
+					// Log a summary of what vision detected
+					let vision_summary = vision_result
+						.get("summary")
+						.and_then(|v| v.as_str())
+						.unwrap_or("Vision analysis complete");
+					emit_log(
+						app,
+						LogLevel::Info,
+						format!("[vision] Step {}: {}", step_num, vision_summary),
+					)
+					.ok();
+
+					// Convert vision issues into SmokeFinding entries
+					if let Some(issues) = vision_result.get("issues").and_then(|v| v.as_array()) {
+						for issue in issues {
+							let severity = issue
+								.get("severity")
+								.and_then(|v| v.as_str())
+								.unwrap_or("info");
+							// Only surface error and warn issues in the findings list
+							if severity == "info" {
+								continue;
+							}
+							let issue_type = issue
+								.get("type")
+								.and_then(|v| v.as_str())
+								.unwrap_or("other");
+							let description = issue
+								.get("description")
+								.and_then(|v| v.as_str())
+								.unwrap_or("Visual defect detected");
+							let region = issue
+								.get("region")
+								.and_then(|v| v.as_str())
+								.map(|r| format!(" [{}]", r))
+								.unwrap_or_default();
+							let msg = format!(
+								"[vision] {}{}: {}",
+								issue_type, region, description
+							);
+							emit_log(app, LogLevel::Warn, &msg).ok();
+							findings.push(SmokeFinding {
+								step: step_num,
+								severity: severity.to_string(),
+								message: msg,
+							});
+						}
+					}
+				}
+			}
+		}
 
 		// — 8. Re-read hierarchy and compare hash ————————————————————————
 		let post_elements = match appium_client::get_page_source(&session.session_id, None).await {

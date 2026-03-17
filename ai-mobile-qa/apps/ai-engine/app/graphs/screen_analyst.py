@@ -26,6 +26,7 @@ _SYSTEM_PROMPT = (
     "likely screen type (login, home, list, detail, dialog, permission, unknown),\n"
     "blockers,\n"
     "best candidate interactions.\n"
+    "Crucially, look for layout overflows. Specifically detect Flutter's signature yellow and black striped 'A RenderFlex overflowed...' warning boxes or ribbons on the edges of the screen. Flag these as 'overflow' in blocker_flags.\n"
     "Prefer deterministic reasoning from UI elements. If elements are sparse, use screenshot cues."
 )
 

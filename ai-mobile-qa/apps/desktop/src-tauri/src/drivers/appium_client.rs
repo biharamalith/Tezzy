@@ -287,6 +287,20 @@ pub async fn screenshot(
     dest_path: &std::path::Path,
     port: Option<u16>,
 ) -> Result<String, String> {
+    let (path, _) = screenshot_with_b64(app, session_id, dest_path, port).await?;
+    Ok(path)
+}
+
+/// Like [`screenshot`], but additionally returns the raw base64 string as received
+/// from Appium so callers can forward it to vision analysis without re-encoding.
+///
+/// Returns `(absolute_file_path, raw_base64_string)`.
+pub async fn screenshot_with_b64(
+    app: &AppHandle,
+    session_id: &str,
+    dest_path: &std::path::Path,
+    port: Option<u16>,
+) -> Result<(String, String), String> {
     let port = port.unwrap_or(DEFAULT_PORT);
     let url = format!("http://127.0.0.1:{}/session/{}/screenshot", port, session_id);
 
@@ -314,12 +328,17 @@ pub async fn screenshot(
         .decode(&result.value)
         .map_err(|err| format!("Failed to decode base64 screenshot: {}", err))?;
 
-    std::fs::write(dest_path, decoded)
+    std::fs::write(dest_path, &decoded)
         .map_err(|err| format!("Failed to write screenshot: {}", err))?;
 
-    emit_log(app, LogLevel::Info, format!("[appium-client] Screenshot saved: {}", dest_path.display())).ok();
+    emit_log(
+        app,
+        LogLevel::Info,
+        format!("[appium-client] Screenshot saved: {}", dest_path.display()),
+    )
+    .ok();
 
-    Ok(dest_path.to_string_lossy().to_string())
+    Ok((dest_path.to_string_lossy().to_string(), result.value))
 }
 
 // ====================== HELPER ======================

@@ -40,31 +40,53 @@ function primaryLabel(el: UiElement): string {
 type Props = {
     serial?: string | null;
     onTap?: (x: number, y: number) => void;
+    // Optional lifted state — when provided, this component acts as a controlled
+    // display and both center + right panel instances share the same dump data.
+    elements?: UiElement[];
+    loading?: boolean;
+    error?: string | null;
+    onDump?: () => void | Promise<void>;
 };
 
-export default function InspectorPanel({ serial, onTap }: Props) {
-    const [elements, setElements] = useState<UiElement[]>([]);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+export default function InspectorPanel({ serial, onTap, elements: propElements, loading: propLoading, error: propError, onDump }: Props) {
+    // Own state — used only when parent does NOT provide lifted state
+    const [ownElements, setOwnElements] = useState<UiElement[]>([]);
+    const [ownLoading,  setOwnLoading]  = useState(false);
+    const [ownError,    setOwnError]    = useState<string | null>(null);
+
+    // If parent provides shared state, use that; otherwise fall back to own state
+    const controlled = propElements !== undefined;
+    const elements   = controlled ? propElements : ownElements;
+    const loading    = controlled ? (propLoading ?? false) : ownLoading;
+    const error      = controlled ? (propError ?? null)   : ownError;
+
     const [filter, setFilter] = useState<"all" | "clickable">("clickable");
     const [tapping, setTapping] = useState<number | null>(null); // index being tapped
 
     // Clear hierarchy when device changes
     useEffect(() => {
-        setElements([]);
-        setError(null);
-    }, [serial]);
+        if (!controlled) {
+            setOwnElements([]);
+            setOwnError(null);
+        }
+    }, [serial, controlled]);
 
     const dump = async () => {
-        setLoading(true);
-        setError(null);
+        if (onDump) {
+            // Delegate to parent for shared state
+            await onDump();
+            return;
+        }
+        // Self-contained fallback
+        setOwnLoading(true);
+        setOwnError(null);
         try {
             const els = await invokeGetUiHierarchy();
-            setElements(els);
+            setOwnElements(els);
         } catch (err) {
-            setError(String(err));
+            setOwnError(String(err));
         } finally {
-            setLoading(false);
+            setOwnLoading(false);
         }
     };
 

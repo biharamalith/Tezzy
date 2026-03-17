@@ -8,11 +8,14 @@ import {
     invokeActionInput,
     invokeActionSwipe,
     invokeActionScreenshot,
+    invokeAiVisionScreenshot,
     listenRunProgress,
     RunProgressEvent,
     SmokeCheckResult,
     SmokeFinding,
     SmokeStepRecord,
+    AiErroredScreenRecord,
+    invokeWriteAiErroredScreensReport,
     UnlistenFn,
 } from "../../lib/tauri";
 
@@ -240,6 +243,112 @@ function buildNavigationRecoveryAction(
     };
 }
 
+const OVERFLOW_MATCHERS = [
+    "a renderflex overflowed",
+    "renderflex overflowed",
+    "overflowed by",
+    "bottom overflowed",
+    "right overflowed",
+    "left overflowed",
+    "top overflowed",
+    "overflow",
+];
+
+function textMentionsOverflow(value: unknown): boolean {
+    const lower = String(value ?? "").toLowerCase();
+    if (!lower) return false;
+    return OVERFLOW_MATCHERS.some((token) => lower.includes(token));
+}
+
+function detectAiOverflowSignal(aiOut: any): { detected: boolean; evidence: string[] } {
+    const evidence: string[] = [];
+    const pushEvidence = (value: unknown) => {
+        const text = String(value ?? "").trim();
+        if (!text) return;
+        if (!textMentionsOverflow(text)) return;
+        if (evidence.includes(text)) return;
+        evidence.push(text);
+    };
+
+    const blockerFlags = Array.isArray(aiOut?.analysis?.blocker_flags)
+        ? aiOut.analysis.blocker_flags
+        : [];
+    for (const flag of blockerFlags) {
+        pushEvidence(flag);
+        if (evidence.length >= 5) break;
+    }
+
+    const triage = aiOut?.triage;
+    const findings = Array.isArray(triage?.deduped_findings)
+        ? triage.deduped_findings
+        : Array.isArray(triage?.new_findings)
+            ? triage.new_findings
+            : [];
+
+    for (const finding of findings) {
+        if (!finding || typeof finding !== "object") continue;
+        const fields = [
+            finding.kind,
+            finding.issue,
+            finding.type,
+            finding.category,
+            finding.code,
+            finding.title,
+            finding.message,
+            finding.reason,
+            finding.summary,
+        ];
+        for (const field of fields) {
+            pushEvidence(field);
+            if (evidence.length >= 5) break;
+        }
+
+        const evidenceList = Array.isArray(finding.evidence) ? finding.evidence : [];
+        for (const item of evidenceList) {
+            pushEvidence(item);
+            if (evidence.length >= 5) break;
+        }
+
+        if (evidence.length >= 5) break;
+    }
+
+    return { detected: evidence.length > 0, evidence };
+}
+
+function detectFlutterOverflowFromElements(
+    elements: Array<any>,
+): { detected: boolean; issue: string; evidence: string[] } {
+    const evidence: string[] = [];
+    for (const el of elements) {
+        const textBits = [
+            el?.text,
+            el?.content_desc,
+            el?.resource_id,
+            el?.hint,
+            el?.label,
+            el?.name,
+            el?.description,
+            el?.class,
+            el?.class_full,
+        ]
+            .map((v) => String(v ?? "").trim())
+            .filter(Boolean);
+        if (textBits.length === 0) continue;
+
+        const joined = textBits.join(" | ");
+        if (textMentionsOverflow(joined)) {
+            evidence.push(joined);
+            if (evidence.length >= 3) break;
+        }
+    }
+
+    return {
+        detected: evidence.length > 0,
+        issue: "flutter_renderflex_overflow",
+        evidence,
+    };
+}
+
 // ── component ─────────────────────────────────────────────────────────────────
 
 export default function SmokeCheckPanel() {
@@ -260,19 +369,19 @@ export default function SmokeCheckPanel() {
     function pickLikelyTextField(
         elements: Array<any>,
         fieldHint: string | null,
-		textBeingTyped: string = "",
+        textBeingTyped: string = "",
     ): { x: number; y: number } | null {
         let hint = (fieldHint ?? "").trim().toLowerCase();
 
-		// Auto-guess hint based on text content to distinguish email vs password fields
-		if (!hint && textBeingTyped) {
-			const lowerText = textBeingTyped.toLowerCase();
-			if (lowerText.includes("@")) {
-				hint = "email";
-			} else if (lowerText === "123456" || lowerText.includes("pass")) {
-				hint = "password";
-			}
-		}
+        // Auto-guess hint based on text content to distinguish email vs password fields
+        if (!hint && textBeingTyped) {
+            const lowerText = textBeingTyped.toLowerCase();
+            if (lowerText.includes("@")) {
+                hint = "email";
+            } else if (lowerText === "123456" || lowerText.includes("pass")) {
+                hint = "password";
+            }
+        }
 
         const norm = (s: any) => String(s ?? "").toLowerCase();
         const isEdit = (el: any) => {
@@ -286,7 +395,7 @@ export default function SmokeCheckPanel() {
                 norm(el.resource_id).includes(hint) ||
                 norm(el.content_desc).includes(hint) ||
                 norm(el.text).includes(hint) ||
-				norm(el.hint).includes(hint)
+                norm(el.hint).includes(hint)
             );
         };
 
@@ -297,12 +406,12 @@ export default function SmokeCheckPanel() {
         const candidates = editFields.filter((el) => matchesHint(el));
 
         let best = candidates[0];
-		// Fallback: If looking for password and missed, assume 2nd text field is password
-		if (!best && hint.includes("password") && editFields.length >= 2) {
-			best = editFields[1];
-		} else if (!best) {
-			best = editFields[0];
-		}
+        // Fallback: If looking for password and missed, assume 2nd text field is password
+        if (!best && hint.includes("password") && editFields.length >= 2) {
+            best = editFields[1];
+        } else if (!best) {
+            best = editFields[0];
+        }
 
         if (!best) return null;
         const x = Number(best.center_x);
@@ -313,7 +422,7 @@ export default function SmokeCheckPanel() {
 
     async function executeAiAction(
         action: any,
-        ctx?: { ui_elements?: any[], screen_size?: {width: number, height: number} },
+        ctx?: { ui_elements?: any[], screen_size?: { width: number, height: number } },
     ): Promise<{ actionLabel: string; resultStatus: string }> {
         const type = String(action?.type ?? "");
         const params = (action?.params ?? {}) as Record<string, any>;
@@ -376,7 +485,7 @@ export default function SmokeCheckPanel() {
             const h = ctx?.screen_size?.height ?? 1920;
             const cx = Math.floor(w / 2);
             const cy = Math.floor(h / 2);
-            
+
             if (dir === "up") {
                 x1 = cx; y1 = Math.floor(h * 0.8);
                 x2 = cx; y2 = Math.floor(h * 0.2);
@@ -466,12 +575,15 @@ export default function SmokeCheckPanel() {
         const runId = `ai-${Date.now()}`;
         const findings: SmokeFinding[] = [];
         const steps: SmokeStepRecord[] = [];
+        const erroredScreens: AiErroredScreenRecord[] = [];
         const seenHashCounts: Record<string, number> = {};
         const recentActions: Array<Record<string, unknown>> = [];
+        const reportedErrorScreenKeys = new Set<string>();
 
         let lastAction: Record<string, unknown> | null = null;
         let lastResult: string | null = null;
         let failureStreak = 0;
+        let triageFindings: Array<Record<string, unknown>> = [];
 
         try {
             for (let step = 1; step <= maxSteps; step++) {
@@ -483,11 +595,93 @@ export default function SmokeCheckPanel() {
                 const hash = snap.screen_hash;
                 seenHashCounts[hash] = (seenHashCounts[hash] ?? 0) + 1;
 
+                // ── Vision screenshot: capture screen + run vision analysis ──────
+                let stepScreenshotPath: string | null = null;
+                let screenshotSummary: string | null = null;
+
+                try {
+                    const vs = await invokeAiVisionScreenshot(step, hash);
+                    stepScreenshotPath = vs.screenshot_path;
+
+                    if (vs.vision) {
+                        screenshotSummary = vs.vision.summary || null;
+
+                        // Record each vision-detected error/warn as an errored screen
+                        if (vs.vision.has_issues) {
+                            for (const issue of vs.vision.issues) {
+                                if (issue.severity === "warn" || issue.severity === "error") {
+                                    const visionKey = `${hash}:vision:${issue.type}`;
+                                    if (!reportedErrorScreenKeys.has(visionKey)) {
+                                        reportedErrorScreenKeys.add(visionKey);
+                                        const severity = issue.severity as "error" | "warn";
+                                        findings.push({
+                                            step,
+                                            severity,
+                                            message: `Vision: ${issue.type} on screen ${hash} — ${issue.description}`,
+                                        });
+                                        erroredScreens.push({
+                                            step,
+                                            screen_hash: hash,
+                                            issue: issue.type,
+                                            evidence: [
+                                                issue.description,
+                                                ...(issue.region ? [`region: ${issue.region}`] : []),
+                                            ],
+                                            screenshot: stepScreenshotPath,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch {
+                    // Vision is non-fatal — continue the loop
+                }
+
+                const overflowSignal = detectFlutterOverflowFromElements(snap.ui_elements as any[]);
+                const runtimeSignals: Array<Record<string, unknown>> = [];
+                let overflowDetection: Record<string, unknown> = {};
+
+                if (overflowSignal.detected) {
+                    const overflowKey = `${hash}:${overflowSignal.issue}`;
+                    if (!reportedErrorScreenKeys.has(overflowKey)) {
+                        reportedErrorScreenKeys.add(overflowKey);
+                        findings.push({
+                            step,
+                            severity: "error",
+                            message: `Flutter overflow detected on screen ${hash}`,
+                        });
+                        erroredScreens.push({
+                            step,
+                            screen_hash: hash,
+                            issue: overflowSignal.issue,
+                            evidence: overflowSignal.evidence,
+                            screenshot: stepScreenshotPath,
+                        });
+                    }
+                    runtimeSignals.push({
+                        kind: "overflow",
+                        source: "ui_hierarchy_text",
+                        issue: overflowSignal.issue,
+                        step,
+                        screen_hash: hash,
+                    });
+                    overflowDetection = {
+                        detected: true,
+                        issue: overflowSignal.issue,
+                        evidence: overflowSignal.evidence,
+                        source: "ui_hierarchy_text",
+                        step,
+                        screen_hash: hash,
+                        screenshot: stepScreenshotPath,
+                    };
+                }
+
                 const aiOut = await aiRunStep({
                     step,
                     screen_hash: hash,
                     ui_elements: snap.ui_elements as any,
-                    screenshot_summary: null,
+                    screenshot_summary: screenshotSummary,
 
                     last_action: lastAction,
                     last_result: lastResult,
@@ -505,10 +699,44 @@ export default function SmokeCheckPanel() {
                     screen_size: { w: snap.screen_size.width, h: snap.screen_size.height },
                     credentials: null,
 
-                    runtime_signals: [],
-                    overflow_detection: {},
-                    prior_findings: [],
+                    runtime_signals: runtimeSignals,
+                    overflow_detection: overflowDetection,
+                    prior_findings: triageFindings,
                 });
+
+                const triage = (aiOut.triage ?? null) as any;
+                if (triage && typeof triage === "object") {
+                    const deduped = Array.isArray(triage.deduped_findings)
+                        ? triage.deduped_findings
+                        : [];
+                    const fresh = Array.isArray(triage.new_findings)
+                        ? triage.new_findings
+                        : [];
+                    triageFindings = deduped.length > 0
+                        ? (deduped as Array<Record<string, unknown>>)
+                        : (fresh as Array<Record<string, unknown>>);
+                }
+
+                const aiOverflowSignal = detectAiOverflowSignal(aiOut);
+                if (aiOverflowSignal.detected) {
+                    const overflowKey = `${hash}:ai_overflow_signal`;
+                    if (!reportedErrorScreenKeys.has(overflowKey)) {
+                        reportedErrorScreenKeys.add(overflowKey);
+
+                        findings.push({
+                            step,
+                            severity: "error",
+                            message: `AI triage detected overflow signal on screen ${hash}`,
+                        });
+                        erroredScreens.push({
+                            step,
+                            screen_hash: hash,
+                            issue: "flutter_overflow_ai_signal",
+                            evidence: aiOverflowSignal.evidence,
+                            screenshot: stepScreenshotPath,
+                        });
+                    }
+                }
 
                 let nextAction = (aiOut.next_action ?? {}) as any;
                 let type = String(nextAction?.type ?? "");
@@ -552,7 +780,7 @@ export default function SmokeCheckPanel() {
                 }
 
                 try {
-					const exec = await executeAiAction(nextAction, { 
+                    const exec = await executeAiAction(nextAction, {
                         ui_elements: snap.ui_elements as any[],
                         screen_size: snap.screen_size
                     });
@@ -564,7 +792,7 @@ export default function SmokeCheckPanel() {
                     });
                     setProgress((prev) => [
                         ...prev,
-                        { step, total: maxSteps, action: exec.actionLabel, status: "running", screenshot: null },
+                        { step, total: maxSteps, action: exec.actionLabel, status: "running", screenshot: stepScreenshotPath },
                     ]);
 
                     lastAction = nextAction;
@@ -592,6 +820,24 @@ export default function SmokeCheckPanel() {
 
             const stepsDone = steps.length;
             const finalStatus = stopRequestedRef.current ? "stopped" : "complete";
+            let reportPath: string | null = null;
+
+            if (stepsDone >= 20) {
+                try {
+                    reportPath = await invokeWriteAiErroredScreensReport(
+                        runId,
+                        stepsDone,
+                        erroredScreens,
+                    );
+                } catch (err) {
+                    findings.push({
+                        step: stepsDone,
+                        severity: "warn",
+                        message: `Failed to write AI errored screens report: ${String(err)}`,
+                    });
+                }
+            }
+
             setResult({
                 run_id: runId,
                 device_serial: "local",
@@ -600,7 +846,7 @@ export default function SmokeCheckPanel() {
                 final_status: finalStatus,
                 findings,
                 steps,
-                report_path: null,
+                report_path: reportPath,
             });
         } catch (err) {
             setErrMsg(String(err));
@@ -645,7 +891,7 @@ export default function SmokeCheckPanel() {
                     }}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
                             stroke={accent} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
                         </svg>
                     </div>
                     <span style={{ fontSize: "13px", fontWeight: 700, color: "#E6EDF3" }}>
@@ -951,7 +1197,7 @@ export default function SmokeCheckPanel() {
                             // Open the folder containing the report using Tauri shell API
                             import("@tauri-apps/api/shell").then(({ open }) => {
                                 const dir = result.report_path!.replace(/[/\\][^/\\]+$/, "");
-                                open(dir).catch(() => {});
+                                open(dir).catch(() => { });
                             });
                         }}
                         style={{

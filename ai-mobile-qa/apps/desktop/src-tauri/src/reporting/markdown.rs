@@ -44,18 +44,49 @@ pub fn write_smoke_report(result: &SmokeCheckResult, output_path: &Path) -> Resu
 	if result.findings.is_empty() {
 		md.push_str("No issues detected during this run.\n\n");
 	} else {
-		for finding in &result.findings {
-			let icon = match finding.severity.as_str() {
-				"error" => "🔴",
-				"warn" => "🟡",
-				_ => "🔵",
-			};
-			md.push_str(&format!(
-				"- {} **[{}]** (step {}): {}\n",
-				icon, finding.severity, finding.step, finding.message
-			));
+		// Split findings: vision vs. heuristic
+		let vision_findings: Vec<_> = result.findings.iter().filter(|f| f.message.starts_with("[vision]")).collect();
+		let heuristic_findings: Vec<_> = result.findings.iter().filter(|f| !f.message.starts_with("[vision]")).collect();
+
+		// Heuristic findings (dead_tap, loop, crash, etc.)
+		if !heuristic_findings.is_empty() {
+			for finding in &heuristic_findings {
+				let icon = match finding.severity.as_str() {
+					"error" => "🔴",
+					"warn" => "🟡",
+					_ => "🔵",
+				};
+				md.push_str(&format!(
+					"- {} **[{}]** (step {}): {}\n",
+					icon, finding.severity, finding.step, finding.message
+				));
+			}
+			md.push('\n');
+		} else {
+			md.push_str("No heuristic issues detected.\n\n");
 		}
-		md.push('\n');
+
+		// Vision UI issues in a dedicated table
+		if !vision_findings.is_empty() {
+			md.push_str("### 👁️ Vision UI Issues\n\n");
+			md.push_str("| Step | Severity | Type | Description |\n");
+			md.push_str("|-----:|----------|------|-------------|\n");
+			for finding in &vision_findings {
+				// Message format: "[vision] <type>[<region>]: <description>"
+				let rest = finding.message.trim_start_matches("[vision] ");
+				let (type_part, desc) = rest.split_once(":").unwrap_or((rest, "—"));
+				let icon = match finding.severity.as_str() {
+					"error" => "🔴 error",
+					"warn" => "🟡 warn",
+					_ => "🔵 info",
+				};
+				md.push_str(&format!(
+					"| {} | {} | `{}` | {} |\n",
+					finding.step, icon, type_part.trim(), desc.trim()
+				));
+			}
+			md.push('\n');
+		}
 	}
 
 	// ── Step table ────────────────────────────────────────────────────────

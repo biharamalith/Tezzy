@@ -16,14 +16,21 @@ export default function LivePreviewPanel() {
     const [scrcpyMessage, setScrcpyMessage] = useState<string | null>(null);
     const [isDragging, setIsDragging] = useState(false);
     const [installing, setInstalling] = useState(false);
+    // True when scrcpy was running and then stopped unexpectedly (watchdog fired)
+    const [lastExited, setLastExited] = useState(false);
 
     useEffect(() => {
         let unlisten: UnlistenFn | undefined;
 
         // Listen for scrcpy state changes
         listenScrcpyState((state: ScrcpyStateEvent) => {
-            setScrcpyRunning(state.status === "running");
+            const wasRunning = scrcpyRunning;
+            const nowRunning = state.status === "running";
+            setScrcpyRunning(nowRunning);
             setScrcpyMessage(state.message ?? null);
+            // Mark as unexpectedly exited when it transitions running→stopped via event
+            if (wasRunning && !nowRunning) setLastExited(true);
+            if (nowRunning) setLastExited(false);
         }).then((stop) => {
             unlisten = stop;
         });
@@ -39,6 +46,7 @@ export default function LivePreviewPanel() {
     }, []);
 
     const handleStartPreview = async () => {
+        setLastExited(false);
         try {
             const result = await invokeStartScrcpy();
             setScrcpyMessage(result);
@@ -148,18 +156,24 @@ export default function LivePreviewPanel() {
                 <div style={{
                     display: "flex", alignItems: "center", gap: "6px",
                     padding: "4px 10px", borderRadius: "20px",
-                    background: scrcpyRunning ? "rgba(63,185,80,0.1)" : "rgba(139,148,158,0.08)",
-                    border: `1px solid ${scrcpyRunning ? "rgba(63,185,80,0.25)" : "#20252E"}`,
+                    background: scrcpyRunning
+                        ? "rgba(63,185,80,0.1)"
+                        : lastExited
+                        ? "rgba(227,179,65,0.1)"
+                        : "rgba(139,148,158,0.08)",
+                    border: `1px solid ${
+                        scrcpyRunning ? "rgba(63,185,80,0.25)" : lastExited ? "rgba(227,179,65,0.3)" : "#20252E"
+                    }`,
                     fontSize: "11px", fontWeight: 600,
-                    color: scrcpyRunning ? "#3FB950" : "#6E7681",
+                    color: scrcpyRunning ? "#3FB950" : lastExited ? "#E3B341" : "#6E7681",
                 }}>
                     <span style={{
                         width: 6, height: 6, borderRadius: "50%",
-                        background: scrcpyRunning ? "#3FB950" : "#6E7681",
-                        boxShadow: scrcpyRunning ? "0 0 6px #3FB950" : "none",
+                        background: scrcpyRunning ? "#3FB950" : lastExited ? "#E3B341" : "#6E7681",
+                        boxShadow: scrcpyRunning ? "0 0 6px #3FB950" : lastExited ? "0 0 6px #E3B341" : "none",
                         display: "inline-block",
                     }}/>
-                    {scrcpyRunning ? "Mirroring" : "Idle"}
+                    {scrcpyRunning ? "Mirroring" : lastExited ? "Exited" : "Idle"}
                 </div>
             </div>
 
@@ -240,14 +254,18 @@ export default function LivePreviewPanel() {
                             flex: 1, border: "none", borderRadius: "10px",
                             padding: "11px 0", fontWeight: 700, fontSize: "13px",
                             cursor: installing ? "not-allowed" : "pointer",
-                            background: `linear-gradient(135deg, ${accent}, #7B5CE5)`,
+                            background: lastExited
+                                ? `linear-gradient(135deg, #E3B341, #B8840A)`
+                                : `linear-gradient(135deg, ${accent}, #7B5CE5)`,
                             color: "#fff",
                             opacity: installing ? 0.5 : 1,
                             letterSpacing: "0.2px",
-                            boxShadow: installing ? "none" : "0 4px 14px rgba(157,123,255,0.3)",
+                            boxShadow: installing ? "none" : lastExited
+                                ? "0 4px 14px rgba(227,179,65,0.3)"
+                                : "0 4px 14px rgba(157,123,255,0.3)",
                         }}
                     >
-                        ▶  Start Preview
+                        {lastExited ? "↺  Retry Preview" : "▶  Start Preview"}
                     </button>
                 ) : (
                     <button

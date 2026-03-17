@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Deserialize;
 use tauri::AppHandle;
 
 use crate::core::events::{emit_log, LogLevel};
@@ -18,6 +19,16 @@ const MAX_STEPS_LIMIT: u32 = 50;
 
 /// Minimum per-step delay to avoid hammering the device (milliseconds).
 const MIN_STEP_DELAY_MS: u64 = 500;
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct AiErroredScreenRecord {
+	step: u32,
+	screen_hash: String,
+	issue: String,
+	evidence: Option<Vec<String>>,
+	screenshot: Option<String>,
+}
 
 /// Starts a heuristic auto smoke check run against the active device.
 ///
@@ -77,4 +88,75 @@ pub async fn run_smoke_check_cmd(
 #[tauri::command]
 pub fn stop_smoke_check_cmd() {
 	request_smoke_stop();
+}
+
+/// Writes an AI-run errored screen report as Markdown and returns the absolute path.
+#[tauri::command]
+pub fn write_ai_errored_screens_report_cmd(
+	app: AppHandle,
+	run_id: String,
+	steps_done: u32,
+	errored_screens: Vec<AiErroredScreenRecord>,
+) -> Result<String, String> {
+	let base_dir = app
+		.path_resolver()
+		.app_local_data_dir()
+		.unwrap_or_else(|| PathBuf::from("reports"));
+	let reports_dir = base_dir.join("ai-reports");
+	std::fs::create_dir_all(&reports_dir)
+		.map_err(|e| format!("Failed to create AI reports directory: {}", e))?;
+
+	let ts = SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.map(|d| d.as_millis())
+		.unwrap_or(0);
+	let filename = format!("ai-errored-screens-{}-{}.md", run_id, ts);
+	let out_path = reports_dir.join(filename);
+
+	let mut md = String::new();
+	md.push_str("# AI Test Run Errored Screens\n\n");
+	md.push_str(&format!("> **Run ID**: `{}`  \n", run_id));
+	md.push_str(&format!("> **Steps executed**: {}  \n", steps_done));
+	md.push_str(&format!("> **Errored screens**: {}  \n\n", errored_screens.len()));
+
+	if errored_screens.is_empty() {
+		md.push_str("No errored screens were captured.\n");
+	} else {
+		for item in &errored_screens {
+			md.push_str(&format!("## Step {}\n\n", item.step));
+			md.push_str(&format!("- **Screen hash**: `{}`\n", item.screen_hash));
+			md.push_str(&format!("- **Issue**: {}\n", item.issue));
+
+			if let Some(evidence) = &item.evidence {
+				if !evidence.is_empty() {
+					md.push_str("- **Evidence**:\n");
+					for line in evidence {
+						md.push_str(&format!("  - {}\n", line));
+					}
+				}
+			}
+
+			if let Some(path) = &item.screenshot {
+				let screenshot_name = std::path::Path::new(path)
+					.file_name()
+					.and_then(|f| f.to_str())
+					.unwrap_or(path.as_str());
+				md.push_str(&format!("- **Screenshot**: {}\n", screenshot_name));
+			}
+
+			md.push('\n');
+		}
+	}
+
+	std::fs::write(&out_path, md)
+		.map_err(|e| format!("Failed to write AI errored screen report: {}", e))?;
+
+	emit_log(
+		&app,
+		LogLevel::Info,
+		format!("[command] AI errored screen report written: {}", out_path.display()),
+	)
+	.ok();
+
+	Ok(out_path.to_string_lossy().to_string())
 }

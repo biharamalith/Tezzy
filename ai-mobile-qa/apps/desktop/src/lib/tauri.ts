@@ -253,6 +253,14 @@ export type SmokeCheckResult = {
     report_path?: string | null;
 };
 
+export type AiErroredScreenRecord = {
+    step: number;
+    screen_hash: string;
+    issue: string;
+    evidence?: string[];
+    screenshot?: string | null;
+};
+
 export type RunProgressEvent = {
     /** 1-based current step index */
     step: number;
@@ -265,6 +273,34 @@ export type RunProgressEvent = {
     screenshot?: string | null;
 };
 
+export type AiVisionIssue = {
+    type: string;
+    description: string;
+    severity: string;
+    region?: string | null;
+};
+
+export type AiVisionAnalysis = {
+    has_issues: boolean;
+    issues: AiVisionIssue[];
+    summary?: string | null;
+};
+
+export type AiVisionScreenshotResult = {
+    screenshot_path: string;
+    vision: AiVisionAnalysis | null;
+};
+
+export async function invokeAiVisionScreenshot(
+    step: number,
+    screenHash: string,
+): Promise<AiVisionScreenshotResult> {
+    return invoke<AiVisionScreenshotResult>("ai_vision_screenshot_cmd", {
+        step,
+        screenHash,
+    });
+}
+
 export async function invokeRunSmokeCheck(
     maxSteps?: number,
     perStepDelayMs?: number,
@@ -272,6 +308,18 @@ export async function invokeRunSmokeCheck(
     return invoke<SmokeCheckResult>("run_smoke_check_cmd", {
         maxSteps,
         perStepDelayMs,
+    });
+}
+
+export async function invokeWriteAiErroredScreensReport(
+    runId: string,
+    stepsDone: number,
+    erroredScreens: AiErroredScreenRecord[],
+): Promise<string> {
+    return invoke<string>("write_ai_errored_screens_report_cmd", {
+        runId,
+        stepsDone,
+        erroredScreens,
     });
 }
 

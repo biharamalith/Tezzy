@@ -43,14 +43,30 @@ pub async fn start_scrcpy(
 		});
 	}
 
-	// Check if scrcpy is already running
+	// Check if scrcpy is already running — but also flush any zombie child that
+	// already exited silently (the watchdog takes up to 1.5 s to notice).
 	{
-		let guard = scrcpy_storage().lock().unwrap();
-		if guard.is_some() {
-			emit_log(app, LogLevel::Warn, "[scrcpy] Already running").ok();
-			return Err(ProcessError {
-				message: "scrcpy is already running".to_string(),
-			});
+		let mut guard = scrcpy_storage().lock().unwrap();
+		if let Some(ref mut child) = *guard {
+			match child.try_wait() {
+				// Process already exited — clear the stale handle and allow a fresh start
+				Ok(Some(status)) => {
+					emit_log(app, LogLevel::Warn, format!("[scrcpy] Previous process already exited ({}); clearing handle — allowing restart", status)).ok();
+					*guard = None;
+				}
+				// Actually still running
+				Ok(None) => {
+					emit_log(app, LogLevel::Warn, "[scrcpy] Already running").ok();
+					return Err(ProcessError {
+						message: "scrcpy is already running".to_string(),
+					});
+				}
+				// Error checking — clear and allow retry
+				Err(e) => {
+					emit_log(app, LogLevel::Warn, format!("[scrcpy] Error checking previous process: {} — clearing handle", e)).ok();
+					*guard = None;
+				}
+			}
 		}
 	}
 
@@ -65,6 +81,14 @@ pub async fn start_scrcpy(
 
 	// Disable audio to avoid MediaCodec encoder crashes on many devices
 	args.push("--no-audio".to_string());
+
+	// Keep the screen on while scrcpy is connected.
+	// --turn-screen-on was removed in scrcpy v2.0, so only --stay-awake is used here.
+	args.push("--stay-awake".to_string());
+
+	// Give the window a stable title for scripting / debugging
+	args.push("--window-title".to_string());
+	args.push(format!("Tezzy Mirror — {}", opts.serial));
 
 	if let Some(bitrate) = opts.bitrate {
 		args.push("-b".to_string());
@@ -165,7 +189,7 @@ pub async fn start_scrcpy(
 		let app3 = app_handle.clone();
 		std::thread::spawn(move || {
 			loop {
-				std::thread::sleep(std::time::Duration::from_millis(1500));
+				std::thread::sleep(std::time::Duration::from_millis(500));  // was 1500ms — faster crash detection
 				let mut guard = scrcpy_storage().lock().unwrap();
 				if let Some(ref mut child) = *guard {
 					match child.try_wait() {

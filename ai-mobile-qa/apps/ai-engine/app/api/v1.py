@@ -10,6 +10,7 @@ from app.graphs.issue_triage import get_issue_triage_graph
 from app.graphs.improvement_advisor import get_improvement_advisor_graph
 from app.graphs.final_report import get_final_report_graph
 from app.graphs.run_step import assemble_run_step_output, get_run_step_graph
+from app.graphs.vision_analyst import get_vision_analyst_graph
 from app.schemas.session_bootstrap import SessionBootstrapInput, SessionBootstrapOutput
 from app.schemas.screen_understanding import (
     ScreenUnderstandingInput,
@@ -24,6 +25,7 @@ from app.schemas.improvement_suggestions import (
 )
 from app.schemas.final_report import FinalReportInput, FinalReportOutput
 from app.schemas.run_step import RunStepInput, RunStepOutput
+from app.schemas.vision import VisionAnalysisInput, VisionAnalysisOutput
 
 
 router = APIRouter()
@@ -82,6 +84,14 @@ async def improvements_suggest(
 @router.post("/report/finalize", response_model=FinalReportOutput)
 async def report_finalize(payload: FinalReportInput) -> FinalReportOutput:
     graph = get_final_report_graph()
+    result = await graph.ainvoke({"input": payload})
+    return result["output"]
+
+
+@router.post("/vision/analyze", response_model=VisionAnalysisOutput)
+async def vision_analyze(payload: VisionAnalysisInput) -> VisionAnalysisOutput:
+    """Analyze a base64 screenshot with GPT-4o vision and return structured UI defect findings."""
+    graph = get_vision_analyst_graph()
     result = await graph.ainvoke({"input": payload})
     return result["output"]
 
