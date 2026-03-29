@@ -22,35 +22,43 @@ class IssueTriageState(TypedDict):
 
 _SYSTEM_PROMPT = (
     "You are Tezzy Issue Triage Agent.\n"
-    "Combine runtime signals and vision findings into normalized findings.\n"
-    "Sources: loop, dead_tap, crash_hint, no_elements, overflow_vision.\n"
-    "Deduplicate and assign severity.\n"
+    "Combine runtime signals and vision findings into a normalized, deduplicated findings list.\n"
+    "Sources: loop, dead_tap, crash_hint, no_elements, overflow_vision.\n\n"
+    "SEVERITY RULES:\n"
+    "  error   → crash_hint signal present, OR overflow_vision issue detected\n"
+    "  warn    → loop signal present, OR dead_tap signal present\n"
+    "  info    → no_elements signal present, OR any other minor anomaly\n\n"
+    "DEDUPLICATION RULES: Two findings are duplicates if they share the same signal type "
+    "AND the same screen_hash. Keep only the highest-severity copy. "
+    "Do not add a finding that already exists in prior_findings with the same type and screen_hash.\n\n"
+    "SHOULD CONTINUE RULES — set should_continue=false if ANY of the following are true:\n"
+    "  (1) A crash_hint signal is present in runtime_signals.\n"
+    "  (2) More than 3 overflow errors are found on the same screen_hash.\n"
+    "  (3) step_context.step indicates failure_streak > 5 (check step_context for this).\n"
+    "Otherwise set should_continue=true.\n\n"
     "Return strict JSON only."
 )
 
 
-_USER_PROMPT_TEMPLATE = (
-    "Input:\n\n"
-    "runtime_signals: {signals}\n"
-    "overflow_detection: {phase E output}\n"
-    "step_context: {step, action, screen_hash}\n"
-    "prior_findings: {findings_so_far}\n"
-    "Return:\n\n"
-    "new_findings\n"
-    "deduped_findings\n"
-    "severity_summary\n"
-    "should_continue (true or false)"
-)
-
-
 def build_phase_f_user_messages(payload: IssueTriageInput) -> list[str]:
-    input_obj = {
-        "runtime_signals": payload.runtime_signals,
-        "overflow_detection": payload.overflow_detection,
-        "step_context": payload.step_context,
-        "prior_findings": payload.prior_findings,
-    }
-    return [json.dumps(input_obj, ensure_ascii=False), _USER_PROMPT_TEMPLATE]
+    signals_str = json.dumps(payload.runtime_signals, ensure_ascii=False)
+    overflow_str = json.dumps(payload.overflow_detection, ensure_ascii=False)
+    context_str = json.dumps(payload.step_context, ensure_ascii=False)
+    findings_str = json.dumps(payload.prior_findings, ensure_ascii=False)
+
+    prompt = (
+        "Input:\n\n"
+        f"runtime_signals: {signals_str}\n"
+        f"overflow_detection: {overflow_str}\n"
+        f"step_context: {context_str}\n"
+        f"prior_findings: {findings_str}\n"
+        "Return:\n\n"
+        "new_findings\n"
+        "deduped_findings\n"
+        "severity_summary\n"
+        "should_continue (true or false)"
+    )
+    return [prompt]
 
 
 async def _phase_f_issue_triage(state: IssueTriageState) -> Dict[str, Any]:

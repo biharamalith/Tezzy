@@ -20,6 +20,20 @@ import {
 } from "../../lib/tauri";
 
 import { aiRunStep } from "../../lib/aiEngine";
+import type { ActionRecord, ScenarioExecutionState, GoalProgress } from "../../types/scenario";
+import {
+    saveExecutionState,
+    deleteExecutionState,
+    listIncompleteRuns,
+    getIncompleteRunMetadata,
+} from "../../lib/executionStatePersistence";
+import {
+    checkMaxStepsPerGoal,
+    checkTimeout,
+    shouldStopOnFailure,
+    formatConstraintViolation,
+    createConstraintViolationFinding,
+} from "../../lib/scenarioConstraints";
 
 const accent = "#9D7BFF";
 const warn = "#E3B341";
@@ -355,12 +369,30 @@ export default function SmokeCheckPanel() {
     const [running, setRunning] = useState(false);
     const [maxSteps, setMaxSteps] = useState(20);
     const [delayMs, setDelayMs] = useState(1500);
+    const [timeoutSeconds, setTimeoutSeconds] = useState(300); // 5 minutes default
     const [progress, setProgress] = useState<RunProgressEvent[]>([]);
     const [result, setResult] = useState<SmokeCheckResult | null>(null);
     const [errMsg, setErrMsg] = useState<string | null>(null);
+    const [incompleteRuns, setIncompleteRuns] = useState<Array<{
+        run_id: string;
+        scenario_name: string;
+        scenario_id: string;
+        current_goal_index: number;
+        total_goals: number;
+        goals_completed: number;
+        goals_failed: number;
+        started_at: number;
+        elapsed_seconds: number;
+    }>>([]);
     const feedRef = useRef<HTMLDivElement>(null);
     const unlistenRef = useRef<UnlistenFn | undefined>(undefined);
     const stopRequestedRef = useRef(false);
+    const seenElementKeys = useRef<string[]>([]);
+    const loopCount = useRef<number>(0);
+    const lastScreenHash = useRef<string | null>(null);
+    const noElementCount = useRef<number>(0);
+    const completedScreens = useRef<Set<string>>(new Set());
+    const recentActionsRef = useRef<ActionRecord[]>([]);
 
     function sleep(ms: number) {
         return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -536,6 +568,49 @@ export default function SmokeCheckPanel() {
         return () => { unlistenRef.current?.(); };
     }, []);
 
+    // ── Detect incomplete runs on startup (Requirement 30.3, 30.4) ──
+    useEffect(() => {
+        const detectIncompleteRuns = async () => {
+            try {
+                const runIds = await listIncompleteRuns();
+                
+                if (runIds.length === 0) {
+                    console.log("No incomplete runs detected");
+                    return;
+                }
+
+                console.log(`Detected ${runIds.length} incomplete run(s):`, runIds);
+
+                // Get metadata for each incomplete run
+                const incompleteRunsMetadata = [];
+                for (const runId of runIds) {
+                    const metadata = await getIncompleteRunMetadata(runId);
+                    if (metadata) {
+                        incompleteRunsMetadata.push(metadata);
+                    }
+                }
+
+                // Store incomplete run info for UI (Phase 3 will use this)
+                setIncompleteRuns(incompleteRunsMetadata);
+
+                // Log summary for debugging
+                if (incompleteRunsMetadata.length > 0) {
+                    console.log("Incomplete runs available for resume:");
+                    incompleteRunsMetadata.forEach(run => {
+                        console.log(`  - ${run.scenario_name} (${run.run_id})`);
+                        console.log(`    Progress: ${run.goals_completed}/${run.total_goals} goals completed`);
+                        console.log(`    Elapsed: ${run.elapsed_seconds}s`);
+                    });
+                }
+            } catch (error) {
+                console.error("Failed to detect incomplete runs:", error);
+                // Non-critical error, don't show to user
+            }
+        };
+
+        detectIncompleteRuns();
+    }, []); // Run once on mount
+
     const handleStart = async () => {
         setRunning(true);
         setProgress([]);
@@ -567,17 +642,33 @@ export default function SmokeCheckPanel() {
         setResult(null);
         setErrMsg(null);
         stopRequestedRef.current = false;
+        
+        // Reset seen element keys for new run
+        seenElementKeys.current = [];
+        
+        // Reset loop tracking for new run
+        loopCount.current = 0;
+        lastScreenHash.current = null;
+        
+        // Reset no element count for new run
+        noElementCount.current = 0;
+        
+        // Reset completed screens for new run
+        completedScreens.current = new Set();
+        
+        // Reset recent actions for new run
+        recentActionsRef.current = [];
 
         // No Rust-emitted run_progress stream for this path.
         unlistenRef.current?.();
         unlistenRef.current = undefined;
 
         const runId = `ai-${Date.now()}`;
+        const scenarioStartTime = Date.now(); // Track start time for timeout constraint
         const findings: SmokeFinding[] = [];
         const steps: SmokeStepRecord[] = [];
         const erroredScreens: AiErroredScreenRecord[] = [];
         const seenHashCounts: Record<string, number> = {};
-        const recentActions: Array<Record<string, unknown>> = [];
         const reportedErrorScreenKeys = new Set<string>();
 
         let lastAction: Record<string, unknown> | null = null;
@@ -591,6 +682,29 @@ export default function SmokeCheckPanel() {
                     break;
                 }
 
+                // ── Check timeout constraint before each step ──
+                const timeoutResult = checkTimeout(scenarioStartTime, timeoutSeconds);
+                if (timeoutResult.violated) {
+                    const violationMsg = formatConstraintViolation(timeoutResult);
+                    console.warn(violationMsg);
+                    findings.push({
+                        step,
+                        severity: "error",
+                        message: timeoutResult.message || "Timeout exceeded",
+                    });
+                    steps.push({
+                        step_num: step,
+                        action: "timeout",
+                        result_status: "stopped",
+                        screenshot: null,
+                    });
+                    setProgress((prev) => [
+                        ...prev,
+                        { step, total: maxSteps, action: "timeout", status: "error", screenshot: null },
+                    ]);
+                    break;
+                }
+
                 const snap = await invokeGetUiSnapshot();
                 const hash = snap.screen_hash;
                 seenHashCounts[hash] = (seenHashCounts[hash] ?? 0) + 1;
@@ -598,10 +712,12 @@ export default function SmokeCheckPanel() {
                 // ── Vision screenshot: capture screen + run vision analysis ──────
                 let stepScreenshotPath: string | null = null;
                 let screenshotSummary: string | null = null;
+                let screenshotB64: string | null = null;
 
                 try {
                     const vs = await invokeAiVisionScreenshot(step, hash);
                     stepScreenshotPath = vs.screenshot_path;
+                    screenshotB64 = vs.screenshot_b64 ?? null;
 
                     if (vs.vision) {
                         screenshotSummary = vs.vision.summary || null;
@@ -682,6 +798,7 @@ export default function SmokeCheckPanel() {
                     screen_hash: hash,
                     ui_elements: snap.ui_elements as any,
                     screenshot_summary: screenshotSummary,
+                    screenshot_b64: screenshotB64,
 
                     last_action: lastAction,
                     last_result: lastResult,
@@ -689,11 +806,11 @@ export default function SmokeCheckPanel() {
                     // Start simple: explore mode; bootstrap can be layered in later.
                     mode: "explore",
                     seen_hash_counts: seenHashCounts,
-                    seen_element_keys: [],
-                    recent_actions: recentActions,
+                    seen_element_keys: seenElementKeys.current,
+                    recent_actions: recentActionsRef.current.slice(-10).map(r => r.action as Record<string, unknown>),
                     failure_streak: failureStreak,
-                    loop_count: 0,
-                    no_element_count: snap.ui_elements.length === 0 ? 1 : 0,
+                    loop_count: loopCount.current,
+                    no_element_count: noElementCount.current,
 
                     // ai-engine planner expects w/h (run_step also accepts width/height).
                     screen_size: { w: snap.screen_size.width, h: snap.screen_size.height },
@@ -742,7 +859,7 @@ export default function SmokeCheckPanel() {
                 let type = String(nextAction?.type ?? "");
 
                 const sameHashCount = seenHashCounts[hash] ?? 1;
-                const swipeStreak = trailingSwipeCount(recentActions);
+                const swipeStreak = trailingSwipeCount(recentActionsRef.current.map(r => r.action as Record<string, unknown>));
                 const forcedTapAction = isSwipeAction(nextAction) && swipeStreak >= 1
                     ? (() => {
                         const tapTarget = pickTapFirstTarget(snap.ui_elements as any[], snap.screen_size);
@@ -797,7 +914,139 @@ export default function SmokeCheckPanel() {
 
                     lastAction = nextAction;
                     lastResult = exec.resultStatus;
-                    recentActions.push(nextAction);
+                    
+                    // Track action with proper ActionRecord structure
+                    const actionRecord: ActionRecord = {
+                        step,
+                        action: {
+                            type: String(nextAction?.type ?? ""),
+                            params: (nextAction?.params ?? {}) as Record<string, unknown>,
+                        },
+                        screen_hash: hash,
+                        result: exec.resultStatus as any, // Map to ActionResult type
+                        contributed_to_goal: false, // Will be updated when goal tracking is implemented
+                    };
+                    
+                    recentActionsRef.current.push(actionRecord);
+                    // Keep only last 10 actions
+                    if (recentActionsRef.current.length > 10) {
+                        recentActionsRef.current = recentActionsRef.current.slice(-10);
+                    }
+
+                    // Update loop count tracking
+                    if (hash === lastScreenHash.current) {
+                        loopCount.current += 1;
+                    } else {
+                        loopCount.current = 0;
+                        lastScreenHash.current = hash;
+                    }
+
+                    // Update no element count
+                    if (snap.ui_elements.length === 0) {
+                        noElementCount.current += 1;
+                    } else {
+                        noElementCount.current = 0;
+                    }
+
+                    // Track tapped elements
+                    if (nextAction.type === "tap_xy" && snap.ui_elements) {
+                        const tappedX = Number(nextAction.params?.x ?? 0);
+                        const tappedY = Number(nextAction.params?.y ?? 0);
+                        
+                        // Find the element that was tapped
+                        for (const el of snap.ui_elements as any[]) {
+                            if (el && typeof el === "object") {
+                                const elX = Number(el.center_x ?? 0);
+                                const elY = Number(el.center_y ?? 0);
+                                const distance = Math.sqrt(Math.pow(elX - tappedX, 2) + Math.pow(elY - tappedY, 2));
+                                
+                                // If tap is within 50px of element center, consider it tapped
+                                if (distance < 50) {
+                                    const elementKey = `${el.resource_id ?? ""}::${el.bounds ?? ""}`;
+                                    if (!seenElementKeys.current.includes(elementKey)) {
+                                        seenElementKeys.current.push(elementKey);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Check if screen is completed (all clickable elements tapped)
+                    const clickableElements = (snap.ui_elements as any[]).filter(
+                        el => el && el.clickable === "true"
+                    );
+                    const allClickableTapped = clickableElements.every(el => {
+                        const elementKey = `${el.resource_id ?? ""}::${el.bounds ?? ""}`;
+                        return seenElementKeys.current.includes(elementKey);
+                    });
+                    if (allClickableTapped && clickableElements.length > 0) {
+                        completedScreens.current.add(hash);
+                    }
+
+                    // ── Persist execution state after each action ──
+                    try {
+                        const executionState: ScenarioExecutionState = {
+                            run_id: runId,
+                            scenario: {
+                                id: "exploration-mode",
+                                name: "AI Exploration",
+                                description: "Autonomous AI exploration without predefined goals",
+                                app_name: "unknown",
+                                goals: [],
+                            },
+                            current_goal_index: 0,
+                            goal_progress: new Map(),
+                            seen_element_keys: new Set(seenElementKeys.current),
+                            seen_hash_counts: new Map(Object.entries(seenHashCounts).map(([k, v]) => [k, v])),
+                            completed_screens: completedScreens.current,
+                            loop_count: loopCount.current,
+                            no_element_count: noElementCount.current,
+                            recent_actions: recentActionsRef.current,
+                            failure_streak: failureStreak,
+                            goals_completed: 0,
+                            goals_failed: 0,
+                            total_findings: findings.map(f => ({
+                                ...f,
+                                severity: (f.severity === "error" || f.severity === "warn" || f.severity === "info") 
+                                    ? f.severity 
+                                    : "info"
+                            })) as any,
+                            mode: "explore",
+                            login_step: 0,
+                            started_at: scenarioStartTime,
+                        };
+                        
+                        await saveExecutionState(runId, executionState);
+                    } catch (stateErr) {
+                        // State persistence is non-critical, log but don't break execution
+                        console.error("Failed to persist execution state:", stateErr);
+                    }
+
+                    // ── Check max_steps constraint (acts as max_steps_per_goal for exploration) ──
+                    // Note: In scenario-based execution, this will check per-goal constraints
+                    const mockGoalProgress: GoalProgress = {
+                        goal_id: "exploration",
+                        status: "in_progress",
+                        steps_taken: step,
+                        success_criteria_met: [],
+                        success_criteria_pending: [],
+                        findings: [],
+                        screenshots: [],
+                        actions_log: recentActionsRef.current,
+                    };
+                    
+                    const maxStepsResult = checkMaxStepsPerGoal(mockGoalProgress, maxSteps);
+                    if (maxStepsResult.violated) {
+                        const violationMsg = formatConstraintViolation(maxStepsResult);
+                        console.warn(violationMsg);
+                        findings.push({
+                            step,
+                            severity: "warn",
+                            message: maxStepsResult.message || "Max steps reached",
+                        });
+                        // Don't break - let the loop naturally end at maxSteps
+                    }
 
                     // Wait between steps (like the heuristic smoke check)
                     if (delayMs > 0) {
@@ -848,6 +1097,15 @@ export default function SmokeCheckPanel() {
                 steps,
                 report_path: reportPath,
             });
+
+            // ── Clean up execution state on completion ──
+            try {
+                await deleteExecutionState(runId);
+                console.log(`Execution state cleaned up for run: ${runId}`);
+            } catch (cleanupErr) {
+                console.error("Failed to cleanup execution state:", cleanupErr);
+                // Non-critical, don't throw
+            }
         } catch (err) {
             setErrMsg(String(err));
         } finally {
@@ -973,7 +1231,6 @@ export default function SmokeCheckPanel() {
                             </select>
                         </label>
                     )}
-
                     {/* Action button */}
                     {running ? (
                         <button

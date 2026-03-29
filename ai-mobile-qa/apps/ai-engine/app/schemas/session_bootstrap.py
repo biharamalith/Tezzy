@@ -11,6 +11,38 @@ class Credentials(BaseModel):
     optional_otp_note: Optional[str] = None
 
 
+class GoalHints(BaseModel):
+    """Hints to guide the AI during goal execution"""
+    expected_screens: Optional[List[str]] = None
+    required_actions: Optional[List[str]] = None
+    avoid_actions: Optional[List[str]] = None
+
+
+class ScenarioGoal(BaseModel):
+    """A single goal within a scenario"""
+    id: str
+    description: str
+    type: Literal["login", "navigate", "form_fill", "verify", "explore_section", "custom"]
+    success_criteria: List[str]
+    hints: Optional[GoalHints] = None
+    form_data: Optional[Dict[str, str]] = None
+
+
+class ScenarioCredentials(BaseModel):
+    """Credentials for login scenarios"""
+    email: str
+    password: str
+
+
+class Scenario(BaseModel):
+    """Scenario context for session bootstrap"""
+    id: str
+    name: str
+    description: str
+    goals: List[ScenarioGoal]
+    credentials: Optional[ScenarioCredentials] = None
+
+
 class SessionBootstrapInput(BaseModel):
     app_name: str
     platform: Literal["android"] = "android"
@@ -19,6 +51,9 @@ class SessionBootstrapInput(BaseModel):
     home_markers: List[str]
     flow_hints: Optional[List[str]] = None
     constraints: Dict[str, Any] = Field(default_factory=dict)
+    
+    # NEW: Optional scenario context
+    scenario: Optional[Scenario] = None
 
 
 class SessionBootstrapOutput(BaseModel):

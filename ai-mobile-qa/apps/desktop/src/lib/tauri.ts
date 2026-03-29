@@ -288,6 +288,7 @@ export type AiVisionAnalysis = {
 
 export type AiVisionScreenshotResult = {
     screenshot_path: string;
+    screenshot_b64?: string | null;
     vision: AiVisionAnalysis | null;
 };
 

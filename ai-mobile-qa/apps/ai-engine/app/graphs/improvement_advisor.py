@@ -29,16 +29,8 @@ _SYSTEM_PROMPT = (
 
 
 _USER_PROMPT_TEMPLATE = (
-    "Input:\n\n"
-    "final_findings\n"
-    "flow_coverage_stats\n"
-    "repeated_fail_patterns\n"
-    "overflow_instances\n"
-    "Return:\n\n"
-    "product_improvements\n"
-    "qa_automation_improvements\n"
-    "priority_order (P1, P2, P3)\n"
-    "quick_wins_24h"
+    "Based on the QA run data above, generate specific, actionable improvements. "
+    "Return product_improvements, qa_automation_improvements, priority_order, and quick_wins_24h."
 )
 
 

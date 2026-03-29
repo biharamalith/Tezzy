@@ -10,16 +10,20 @@ from app.graphs.critic_gate import get_critic_gate_graph
 from app.graphs.issue_triage import get_issue_triage_graph
 from app.graphs.planner import get_planner_graph
 from app.graphs.screen_analyst import get_screen_analyst_graph
+from app.graphs.vision_analyst import get_vision_analyst_graph
 from app.schemas.critic_gate import CriticGateInput
 from app.schemas.issue_triage import IssueTriageInput
 from app.schemas.planner import AttemptCounters, PlannerInput, ScreenSize
 from app.schemas.run_step import RunStepInput, RunStepOutput
 from app.schemas.screen_understanding import MemorySnapshot, ScreenUnderstandingInput
+from app.schemas.vision import VisionAnalysisInput
 
 
 class RunStepState(TypedDict, total=False):
     input: RunStepInput
 
+    vision: Dict[str, Any] | None
+    effective_overflow_detection: Dict[str, Any]
     triage: Dict[str, Any] | None
     should_continue: bool
     findings: list[Dict[str, Any]]
@@ -50,17 +54,77 @@ def _memory_snapshot_from_input(inp: RunStepInput) -> MemorySnapshot:
     )
 
 
+def _merge_overflow_detection(
+    overflow_detection: Dict[str, Any],
+    vision_output: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    merged = dict(overflow_detection or {})
+    if not vision_output:
+        return merged
+
+    issues = vision_output.get("issues") or []
+    has_issues = bool(vision_output.get("has_issues", bool(issues)))
+    overflow_issues = [i for i in issues if isinstance(i, dict) and i.get("type") == "overflow"]
+
+    evidence: list[str] = []
+    existing_evidence = merged.get("evidence")
+    if isinstance(existing_evidence, list):
+        evidence.extend(str(x) for x in existing_evidence)
+    evidence.extend(
+        str(issue.get("description"))
+        for issue in overflow_issues
+        if isinstance(issue, dict) and issue.get("description")
+    )
+
+    merged["vision"] = {
+        "has_issues": has_issues,
+        "summary": vision_output.get("summary", ""),
+        "issues": issues,
+    }
+    merged["detected"] = bool(merged.get("detected", False) or bool(overflow_issues))
+    if overflow_issues and not merged.get("issue"):
+        merged["issue"] = "vision_overflow"
+    if evidence:
+        merged["evidence"] = evidence
+    return merged
+
+
+async def _vision_previous_step(state: RunStepState) -> Dict[str, Any]:
+    inp = state["input"]
+    if not inp.screenshot_b64:
+        return {
+            "vision": None,
+            "effective_overflow_detection": inp.overflow_detection,
+        }
+
+    graph = get_vision_analyst_graph()
+    vision_input = VisionAnalysisInput(
+        screenshot_b64=inp.screenshot_b64,
+        step=inp.step,
+        screen_hash=inp.screen_hash,
+    )
+    res = await graph.ainvoke({"input": vision_input})
+    vision_out = res["output"].model_dump()
+
+    merged_overflow = _merge_overflow_detection(inp.overflow_detection, vision_out)
+    return {
+        "vision": vision_out,
+        "effective_overflow_detection": merged_overflow,
+    }
+
+
 async def _triage_previous_step(state: RunStepState) -> Dict[str, Any]:
     inp = state["input"]
+    overflow_detection = state.get("effective_overflow_detection") or inp.overflow_detection
 
     # Triage is meaningful only if we have any signals/vision/context.
-    if not inp.runtime_signals and not inp.overflow_detection:
+    if not inp.runtime_signals and not overflow_detection:
         return {"triage": None, "should_continue": True, "findings": inp.prior_findings}
 
     triage_graph = get_issue_triage_graph()
     triage_input = IssueTriageInput(
         runtime_signals=inp.runtime_signals,
-        overflow_detection=inp.overflow_detection,
+        overflow_detection=overflow_detection,
         step_context={
             "step": inp.step,
             "action": inp.last_action,
@@ -143,14 +207,16 @@ async def _critic_gate(state: RunStepState) -> Dict[str, Any]:
 def build_run_step_graph():
     graph = StateGraph(RunStepState)
 
-    # Execution order per the spec (excluding external execution + overflow vision):
-    # Issue Triage -> Screen Understanding -> Planner -> Critic
+    # Execution order per the spec:
+    # Vision -> Issue Triage -> Screen Understanding -> Planner -> Critic
+    graph.add_node("vision", _vision_previous_step)
     graph.add_node("triage", _triage_previous_step)
     graph.add_node("analyze", _screen_understanding)
     graph.add_node("plan", _plan_next_action)
     graph.add_node("critic", _critic_gate)
 
-    graph.set_entry_point("triage")
+    graph.set_entry_point("vision")
+    graph.add_edge("vision", "triage")
     graph.add_edge("triage", "analyze")
     graph.add_edge("analyze", "plan")
     graph.add_edge("plan", "critic")

@@ -24,6 +24,14 @@ class CriticAction(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
+class GoalConstraints(BaseModel):
+    """Optional constraints for goal-directed validation."""
+    avoid_actions: Optional[List[str]] = None
+    required_screens: Optional[List[str]] = None
+    max_steps: Optional[int] = None
+    steps_taken: int = 0
+
+
 class CriticGateInput(BaseModel):
     proposed_action: Dict[str, Any]
     screen_hash: str
@@ -31,6 +39,7 @@ class CriticGateInput(BaseModel):
     recent_actions: List[Dict[str, Any]] = Field(default_factory=list)
     failure_streak: int = Field(ge=0, default=0)
     mode: PlannerMode
+    goal_constraints: Optional[GoalConstraints] = None
 
 
 Decision = Literal["approve", "reject"]

@@ -14,6 +14,7 @@ class RunStepInput(BaseModel):
     screen_hash: str
     ui_elements: List[Dict[str, Any]] = Field(default_factory=list)
     screenshot_summary: Optional[str] = None
+    screenshot_b64: Optional[str] = None
 
     # Result of the last executed action (for Phase F + for Phase B context)
     last_action: Optional[Dict[str, Any]] = None

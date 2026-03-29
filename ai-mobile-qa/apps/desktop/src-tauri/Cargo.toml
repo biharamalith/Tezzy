@@ -18,6 +18,7 @@ zip = "0.6"
 tokio = { version = "1", features = ["fs", "process", "time"] }
 base64 = "0.21"
 quick-xml = "0.31"
+dirs = "5.0"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

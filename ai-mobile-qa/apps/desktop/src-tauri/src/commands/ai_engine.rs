@@ -77,7 +77,11 @@ pub async fn vision_analyze_screenshot(
 ///
 /// Returns JSON:
 /// ```json
-/// { "screenshot_path": "...", "vision": { "has_issues": bool, "issues": [...], "summary": "..." } | null }
+/// {
+///   "screenshot_path": "...",
+///   "screenshot_b64": "...",
+///   "vision": { "has_issues": bool, "issues": [...], "summary": "..." } | null
+/// }
 /// ```
 ///
 /// Vision errors are non-fatal — `vision` will be `null` and the AI loop continues.
@@ -145,6 +149,7 @@ pub async fn ai_vision_screenshot_cmd(
 
 	Ok(serde_json::json!({
 		"screenshot_path": screenshot_path,
+		"screenshot_b64": raw_b64,
 		"vision": vision,
 	}))
 }

@@ -46,9 +46,31 @@ type Props = {
     loading?: boolean;
     error?: string | null;
     onDump?: () => void | Promise<void>;
+    screenHash?: string | null;
+    bookmarkedScreenHash?: string | null;
+    canRestoreBookmark?: boolean;
+    onBookmarkCurrent?: () => void;
+    onRestoreBookmark?: () => void;
 };
 
-export default function InspectorPanel({ serial, onTap, elements: propElements, loading: propLoading, error: propError, onDump }: Props) {
+function shortHash(hash: string): string {
+    if (hash.length <= 14) return hash;
+    return `${hash.slice(0, 10)}...${hash.slice(-4)}`;
+}
+
+export default function InspectorPanel({
+    serial,
+    onTap,
+    elements: propElements,
+    loading: propLoading,
+    error: propError,
+    onDump,
+    screenHash,
+    bookmarkedScreenHash,
+    canRestoreBookmark,
+    onBookmarkCurrent,
+    onRestoreBookmark,
+}: Props) {
     // Own state — used only when parent does NOT provide lifted state
     const [ownElements, setOwnElements] = useState<UiElement[]>([]);
     const [ownLoading,  setOwnLoading]  = useState(false);
@@ -62,6 +84,8 @@ export default function InspectorPanel({ serial, onTap, elements: propElements, 
 
     const [filter, setFilter] = useState<"all" | "clickable">("clickable");
     const [tapping, setTapping] = useState<number | null>(null); // index being tapped
+
+    const currentIsBookmarked = Boolean(screenHash && bookmarkedScreenHash && screenHash === bookmarkedScreenHash);
 
     // Clear hierarchy when device changes
     useEffect(() => {
@@ -191,6 +215,84 @@ export default function InspectorPanel({ serial, onTap, elements: propElements, 
                     <span style={{ marginLeft: "auto", fontSize: "10px", color: "#4a5568" }}>
                         {filtered.length} / {elements.length}
                     </span>
+                </div>
+            )}
+
+            {(screenHash || bookmarkedScreenHash) && (
+                <div style={{
+                    padding: "8px 16px",
+                    borderBottom: "1px solid #1a2030",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    flexWrap: "wrap",
+                    flexShrink: 0,
+                    background: "rgba(88,166,255,0.04)",
+                }}>
+                    <span style={{ ...sectionLabel, margin: 0, color: "#58A6FF", fontSize: "10px" }}>Screen</span>
+
+                    {screenHash ? (
+                        <span style={{
+                            fontSize: "10px",
+                            color: "#C9D1D9",
+                            fontFamily: "monospace",
+                            background: "#0B1220",
+                            border: "1px solid #1e2530",
+                            borderRadius: "999px",
+                            padding: "2px 8px",
+                        }}>
+                            {shortHash(screenHash)}
+                        </span>
+                    ) : (
+                        <span style={{ fontSize: "10px", color: "#6E7681" }}>No active hash</span>
+                    )}
+
+                    <button
+                        onClick={onBookmarkCurrent}
+                        disabled={!screenHash || loading || !onBookmarkCurrent}
+                        style={{
+                            border: "1px solid rgba(88,166,255,0.35)",
+                            borderRadius: "999px",
+                            padding: "3px 9px",
+                            background: currentIsBookmarked ? "rgba(88,166,255,0.2)" : "rgba(88,166,255,0.1)",
+                            color: currentIsBookmarked ? "#E6EDF3" : "#58A6FF",
+                            fontSize: "10px",
+                            fontWeight: 700,
+                            cursor: !screenHash || loading || !onBookmarkCurrent ? "not-allowed" : "pointer",
+                            opacity: !screenHash || loading || !onBookmarkCurrent ? 0.45 : 1,
+                        }}
+                    >
+                        {currentIsBookmarked ? "Bookmarked" : "Bookmark current"}
+                    </button>
+
+                    <button
+                        onClick={onRestoreBookmark}
+                        disabled={!canRestoreBookmark || loading || !onRestoreBookmark}
+                        style={{
+                            border: "1px solid rgba(157,123,255,0.35)",
+                            borderRadius: "999px",
+                            padding: "3px 9px",
+                            background: "rgba(157,123,255,0.1)",
+                            color: "#9D7BFF",
+                            fontSize: "10px",
+                            fontWeight: 700,
+                            cursor: !canRestoreBookmark || loading || !onRestoreBookmark ? "not-allowed" : "pointer",
+                            opacity: !canRestoreBookmark || loading || !onRestoreBookmark ? 0.45 : 1,
+                        }}
+                    >
+                        Restore bookmark
+                    </button>
+
+                    {bookmarkedScreenHash && (
+                        <span style={{
+                            marginLeft: "auto",
+                            fontSize: "10px",
+                            color: "#8B949E",
+                            fontFamily: "monospace",
+                        }}>
+                            Saved: {shortHash(bookmarkedScreenHash)}
+                        </span>
+                    )}
                 </div>
             )}
 

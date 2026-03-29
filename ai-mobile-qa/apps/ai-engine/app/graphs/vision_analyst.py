@@ -28,9 +28,14 @@ _SYSTEM_PROMPT = (
     "  - truncation: text that is visibly cut with ellipsis or clipped mid-character\n"
     "  - misalignment: buttons, labels, or icons that are visibly off-center or misaligned\n"
     "  - off_screen: interactive elements partially or fully outside the visible area\n"
-    "  - other: any other obvious rendering defect\n"
-    "Be precise. Only flag real visible defects — do not flag intentional design choices.\n"
-    "Respond with json only."
+    "  - other: any other obvious rendering defect\n\n"
+    "CONFIDENCE THRESHOLD: Only flag a defect if you are confident it is a real rendering error, "
+    "not an intentional design choice. Minor pixel-level differences, intentional clipping for "
+    "aesthetic reasons, or truncation in clearly bounded labels should NOT be flagged.\n\n"
+    "REGION PRECISION: For every issue, describe the region precisely using spatial landmarks "
+    "e.g. 'bottom navigation bar, right side', 'top app bar, left of title', 'card #2 in list'. "
+    "Do not use vague labels like 'bottom' or 'right' alone.\n\n"
+    "Respond with JSON only."
 )
 
 _USER_PROMPT_TEMPLATE = (
@@ -45,7 +50,10 @@ _USER_PROMPT_TEMPLATE = (
     "  type: one of overflow | clipping | truncation | misalignment | off_screen | other\n"
     "  description: concise description of the issue\n"
     "  severity: one of error | warn | info\n"
-    "  region: optional region label e.g. 'top-right', 'bottom nav', null if unknown\n\n"
+    "  region: precise spatial label e.g. 'bottom navigation bar, right side' — never null if visible\n\n"
+    "OVERFLOW DEFECTS: For any overflow issue, include in description: the exact pixel region where "
+    "the ribbon appears AND the visible text of the overflow message if readable "
+    "(e.g. 'RenderFlex overflowed by 42 pixels on the right').\n\n"
     "If no issues are found, return: {{\"issues\": [], \"has_issues\": false, \"summary\": \"No visual defects detected.\"}}"
 )
 

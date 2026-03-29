@@ -13,7 +13,7 @@ import {
     UiElement,
     UnlistenFn,
     invokeEnvCheck,
-    invokeGetUiHierarchy,
+    invokeGetUiSnapshot,
     invokeListDevices,
     invokeSetActiveDevice,
     listenDeviceState,
@@ -43,6 +43,33 @@ const NAV: { id: CenterTab; label: string; dot: string }[] = [
     { id: "smokecheck", label: "Smoke Check",  dot: WARN     },
     { id: "inspector",  label: "Inspector",    dot: "#58A6FF" },
 ];
+
+type StoredInspectorScreen = {
+    elements: UiElement[];
+    saved_at: number;
+};
+
+const INSPECTOR_CACHE_KEY = "tezzy:inspector:screen_cache:v1";
+const INSPECTOR_BOOKMARK_KEY = "tezzy:inspector:last_bookmark:v1";
+const MAX_INSPECTOR_CACHE_SCREENS = 40;
+
+function readStorageJson<T>(key: string, fallback: T): T {
+    if (typeof window === "undefined") return fallback;
+    try {
+        const raw = window.localStorage.getItem(key);
+        if (!raw) return fallback;
+        return JSON.parse(raw) as T;
+    } catch {
+        return fallback;
+    }
+}
+
+function trimInspectorCache(
+    cache: Record<string, StoredInspectorScreen>,
+): Record<string, StoredInspectorScreen> {
+    const entries = Object.entries(cache).sort((a, b) => b[1].saved_at - a[1].saved_at);
+    return Object.fromEntries(entries.slice(0, MAX_INSPECTOR_CACHE_SCREENS));
+}
 
 // ── Tiny shared components ─────────────────────────────────────────────────────
 function Dot({ color, glow }: { color: string; glow?: boolean }) {
@@ -127,18 +154,82 @@ export default function Layout() {
     const [inspectorElements, setInspectorElements] = useState<UiElement[]>([]);
     const [inspectorLoading,  setInspectorLoading]  = useState(false);
     const [inspectorError,    setInspectorError]    = useState<string | null>(null);
+    const [inspectorScreenHash, setInspectorScreenHash] = useState<string | null>(null);
+    const [inspectorScreenCache, setInspectorScreenCache] = useState<Record<string, StoredInspectorScreen>>(
+        () => readStorageJson<Record<string, StoredInspectorScreen>>(INSPECTOR_CACHE_KEY, {}),
+    );
+    const [inspectorBookmarkHash, setInspectorBookmarkHash] = useState<string | null>(
+        () => readStorageJson<string | null>(INSPECTOR_BOOKMARK_KEY, null),
+    );
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        try {
+            window.localStorage.setItem(INSPECTOR_CACHE_KEY, JSON.stringify(inspectorScreenCache));
+        } catch {
+            // Ignore local storage write issues and keep runtime state only.
+        }
+    }, [inspectorScreenCache]);
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        try {
+            if (inspectorBookmarkHash) {
+                window.localStorage.setItem(INSPECTOR_BOOKMARK_KEY, JSON.stringify(inspectorBookmarkHash));
+            } else {
+                window.localStorage.removeItem(INSPECTOR_BOOKMARK_KEY);
+            }
+        } catch {
+            // Ignore local storage write issues and keep runtime state only.
+        }
+    }, [inspectorBookmarkHash]);
 
     const dumpInspector = async () => {
         setInspectorLoading(true);
         setInspectorError(null);
         try {
-            const els = await invokeGetUiHierarchy();
-            setInspectorElements(els);
+            const snap = await invokeGetUiSnapshot();
+            const elements = snap.ui_elements ?? [];
+            const screenHash = snap.screen_hash ?? null;
+            setInspectorElements(elements);
+            setInspectorScreenHash(screenHash);
+            if (screenHash) {
+                setInspectorScreenCache((prev) => {
+                    const next = {
+                        ...prev,
+                        [screenHash]: {
+                            elements,
+                            saved_at: Date.now(),
+                        },
+                    };
+                    return trimInspectorCache(next);
+                });
+            }
         } catch (err) {
             setInspectorError(String(err));
         } finally {
             setInspectorLoading(false);
         }
+    };
+
+    const bookmarkCurrentInspectorScreen = () => {
+        if (!inspectorScreenHash) return;
+        setInspectorBookmarkHash(inspectorScreenHash);
+    };
+
+    const restoreBookmarkedInspectorScreen = () => {
+        if (!inspectorBookmarkHash) {
+            setInspectorError("No bookmarked inspector screen found.");
+            return;
+        }
+        const cached = inspectorScreenCache[inspectorBookmarkHash];
+        if (!cached) {
+            setInspectorError("Bookmarked screen is no longer cached. Dump the screen and bookmark again.");
+            return;
+        }
+        setInspectorError(null);
+        setInspectorElements(cached.elements);
+        setInspectorScreenHash(inspectorBookmarkHash);
     };
 
     // Responsive sidebar collapse
@@ -176,6 +267,7 @@ export default function Layout() {
     const handleSelect = async (serial: string) => {
         await invokeSetActiveDevice(serial);
         setActiveSerial(serial);
+        setInspectorScreenHash(null);
     };
 
     const handleTabClick = (tab: CenterTab) => {
@@ -465,7 +557,12 @@ export default function Layout() {
                                 elements={inspectorElements}
                                 loading={inspectorLoading}
                                 error={inspectorError}
+                                screenHash={inspectorScreenHash}
+                                bookmarkedScreenHash={inspectorBookmarkHash}
+                                canRestoreBookmark={Boolean(inspectorBookmarkHash && inspectorScreenCache[inspectorBookmarkHash])}
                                 onDump={dumpInspector}
+                                onBookmarkCurrent={bookmarkCurrentInspectorScreen}
+                                onRestoreBookmark={restoreBookmarkedInspectorScreen}
                                 onTap={(x, y) => {
                                     setPrefillTap({ x, y });
                                     setCenterTab("automation");
@@ -521,7 +618,12 @@ export default function Layout() {
                                 elements={inspectorElements}
                                 loading={inspectorLoading}
                                 error={inspectorError}
+                                screenHash={inspectorScreenHash}
+                                bookmarkedScreenHash={inspectorBookmarkHash}
+                                canRestoreBookmark={Boolean(inspectorBookmarkHash && inspectorScreenCache[inspectorBookmarkHash])}
                                 onDump={dumpInspector}
+                                onBookmarkCurrent={bookmarkCurrentInspectorScreen}
+                                onRestoreBookmark={restoreBookmarkedInspectorScreen}
                                 onTap={(x, y) => {
                                     setPrefillTap({ x, y });
                                     setCenterTab("automation");

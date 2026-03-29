@@ -29,6 +29,7 @@ export type RunStepInput = {
     screen_hash: string;
     ui_elements: Array<Record<string, unknown>>;
     screenshot_summary?: string | null;
+    screenshot_b64?: string | null;
 
     last_action?: Record<string, unknown> | null;
     last_result?: string | null;

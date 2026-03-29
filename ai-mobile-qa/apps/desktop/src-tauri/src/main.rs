@@ -36,7 +36,19 @@ fn main() {
 			commands::explorer::get_device_screen_size,
 			commands::reports::run_smoke_check_cmd,
 			commands::reports::stop_smoke_check_cmd,
-			commands::reports::write_ai_errored_screens_report_cmd
+			commands::reports::write_ai_errored_screens_report_cmd,
+			commands::scenarios::save_scenario,
+			commands::scenarios::load_scenario,
+			commands::scenarios::list_scenarios,
+			commands::scenarios::delete_scenario,
+			commands::scenarios::read_file,
+			commands::scenarios::write_file,
+			commands::scenarios::list_json_files,
+			commands::scenarios::ensure_directory,
+			commands::scenarios::save_execution_state,
+			commands::scenarios::load_execution_state,
+			commands::scenarios::delete_execution_state,
+			commands::scenarios::list_incomplete_runs
 		])
 		.run(tauri::generate_context!())
 		.expect("error while running tauri application");

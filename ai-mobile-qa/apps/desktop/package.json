@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@tauri-apps/api": "^1.6.0",
@@ -19,7 +21,9 @@
     "@types/react": "^18.2.48",
     "@types/react-dom": "^18.2.18",
     "@vitejs/plugin-react": "^4.2.1",
+    "jsdom": "^29.0.1",
     "typescript": "^5.3.3",
-    "vite": "^5.0.10"
+    "vite": "^8.0.3",
+    "vitest": "^4.1.2"
   }
 }

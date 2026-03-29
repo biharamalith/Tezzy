@@ -22,8 +22,29 @@ class PlannerState(TypedDict):
 
 
 _SYSTEM_PROMPT = (
-    "You are Tezzy Planner. Propose exactly one next action.\n"
-    "Priority:\n"
+    "You are Tezzy Planner. Propose exactly one next action.\n\n"
+    "CREDENTIALS & LOGIN RULE: If credentials is not null and analysis.screen_type is 'login', "
+    "follow login_step strictly:\n"
+    "  login_step=0 → use input_text to fill the email/username field with credentials.email.\n"
+    "  login_step=1 → use input_text to fill the password field with credentials.password.\n"
+    "  login_step=2 → tap the login/submit button.\n"
+    "  login_step=3 → login submitted; do NOT interact with the login screen again.\n"
+    "Do NOT skip steps or explore other elements until login_step reaches 3.\n\n"
+    "FORM FILLING RULE: If analysis.candidate_targets contains any entry prefixed with 'fill:', "
+    "you MUST use input_text to fill that field BEFORE tapping any button. "
+    "Fill all unfilled form fields before submitting.\n\n"
+    "ONBOARDING SCREEN RULE: If analysis.screen_type is 'onboarding', "
+    "you MUST tap a navigation button by its exact position from candidate_targets. "
+    "Look for elements with text 'Next', 'Skip', 'Continue', or 'Get Started' in ui_elements and use their exact center_x/center_y coordinates. "
+    "Do NOT tap the center of the screen or any random coordinate. "
+    "Do NOT use 'back' on an onboarding screen — it will exit the app entirely.\n\n"
+    "MODE SWITCH RULE: If mode is 'reach_home' and analysis.screen_type is 'home', "
+    "switch mode to 'explore' in your intent. Do not navigate back to home.\n\n"
+    "STUCK SCREEN RULE: If memory_snapshot.seen_hash_counts for the current screen_hash is greater than 3, "
+    "you MUST navigate away. Do NOT tap any element on this screen. "
+    "Choose one: tap a bottom tab, tap the menu/drawer icon, or use the back action.\n\n"
+    "SCREEN COMPLETION RULE: If memory_snapshot.completed_screens contains the current screen_hash, "
+    "navigate away immediately using a tab, drawer, or back action.\n\n"
     "Expand coverage across unvisited flows by interacting with visible elements.\n"
     "Prefer tapping visible buttons, tabs, drawer/menu entries, and list items before using swipe.\n"
     "Do not output more than one swipe in a row unless no actionable element is visible.\n"
@@ -32,34 +53,125 @@ _SYSTEM_PROMPT = (
 )
 
 
-_USER_PROMPT_TEMPLATE = (
-    "Input:\n\n"
-    "mode: {reach_home or explore}\n"
-    "analysis: {output from Phase B}\n"
-    "memory_snapshot: {seen hashes and targets}\n"
-    "screen_size: {w, h}\n"
-    "credentials: {email/password or null}\n"
-    "attempt_counters: {loop_count, no_element_count}\n"
-    "Rules: tap-first exploration, avoid consecutive swipes, use swipe only to reveal new controls.\n"
-    "Return:\n\n"
-    "action.type (tap_xy, input_text, swipe, back, wait_ms, screenshot, stop)\n"
-    "action.params\n"
-    "intent\n"
-    "expected_outcome\n"
-    "fallback_if_fail"
-)
-
-
 def build_phase_c_user_messages(payload: PlannerInput) -> list[str]:
-    input_obj = {
-        "mode": payload.mode,
-        "analysis": payload.analysis,
-        "memory_snapshot": payload.memory_snapshot,
-        "screen_size": payload.screen_size.model_dump(),
-        "credentials": payload.credentials,
-        "attempt_counters": payload.attempt_counters.model_dump(),
-    }
-    return [json.dumps(input_obj, ensure_ascii=False), _USER_PROMPT_TEMPLATE]
+    analysis_str = json.dumps(payload.analysis, ensure_ascii=False)
+    memory_str = json.dumps(payload.memory_snapshot, ensure_ascii=False)
+    screen_size_str = json.dumps(payload.screen_size.model_dump(), ensure_ascii=False)
+    credentials_str = json.dumps(payload.credentials, ensure_ascii=False)
+    counters_str = json.dumps(payload.attempt_counters.model_dump(), ensure_ascii=False)
+
+    prompt_parts = [
+        "Input:\n\n"
+        f"mode: {payload.mode}\n"
+        f"login_step: {payload.login_step}\n"
+        f"analysis: {analysis_str}\n"
+        f"memory_snapshot: {memory_str}\n"
+        f"screen_size: {screen_size_str}\n"
+        f"credentials: {credentials_str}\n"
+        f"attempt_counters: {counters_str}\n"
+    ]
+
+    # Add goal context if provided
+    if payload.current_goal is not None:
+        goal_dict = payload.current_goal.model_dump()
+        goal_str = json.dumps(goal_dict, ensure_ascii=False)
+        prompt_parts.append(f"current_goal: {goal_str}\n")
+        
+        if payload.goal_progress is not None:
+            progress_dict = payload.goal_progress.model_dump()
+            progress_str = json.dumps(progress_dict, ensure_ascii=False)
+            prompt_parts.append(f"goal_progress: {progress_str}\n")
+        
+        # Add goal-specific guidance
+        prompt_parts.append("\n=== GOAL-DIRECTED MODE ===\n")
+        prompt_parts.append(f"Your action MUST advance toward the current goal: {payload.current_goal.description}\n\n")
+        
+        # Show pending success criteria
+        if payload.goal_progress and payload.goal_progress.criteria_pending:
+            prompt_parts.append("Success criteria still pending:\n")
+            for criterion in payload.goal_progress.criteria_pending:
+                prompt_parts.append(f"  - {criterion}\n")
+            prompt_parts.append("\n")
+        
+        # Show met criteria
+        if payload.goal_progress and payload.goal_progress.criteria_met:
+            prompt_parts.append("Success criteria already met:\n")
+            for criterion in payload.goal_progress.criteria_met:
+                prompt_parts.append(f"  ✓ {criterion}\n")
+            prompt_parts.append("\n")
+        
+        # Add goal type-specific rules
+        goal_type = payload.current_goal.type
+        
+        if goal_type == "login":
+            prompt_parts.append("GOAL TYPE: LOGIN\n")
+            prompt_parts.append("- Follow the LOGIN SCREEN RULE strictly (use login_step)\n")
+            prompt_parts.append("- Fill email, then password, then tap login button\n")
+            prompt_parts.append("- Do NOT explore other elements until login completes\n\n")
+        
+        elif goal_type == "form_fill":
+            prompt_parts.append("GOAL TYPE: FORM_FILL\n")
+            if payload.current_goal.form_data:
+                prompt_parts.append("- Fill ALL form fields before tapping submit\n")
+                prompt_parts.append("- Form data to fill:\n")
+                for field_name, field_value in payload.current_goal.form_data.items():
+                    prompt_parts.append(f"    {field_name}: {field_value}\n")
+                prompt_parts.append("- Prioritize input_text actions for unfilled fields\n")
+                prompt_parts.append("- Only tap submit after all fields are filled\n\n")
+        
+        elif goal_type == "navigate":
+            prompt_parts.append("GOAL TYPE: NAVIGATE\n")
+            if payload.current_goal.hints and payload.current_goal.hints.expected_screens:
+                prompt_parts.append("- Navigate toward these screens:\n")
+                for screen in payload.current_goal.hints.expected_screens:
+                    prompt_parts.append(f"    - {screen}\n")
+            prompt_parts.append("- Prioritize actions that move toward the target screen\n")
+            if payload.current_goal.hints and payload.current_goal.hints.required_actions:
+                prompt_parts.append("- Suggested actions:\n")
+                for action in payload.current_goal.hints.required_actions:
+                    prompt_parts.append(f"    - {action}\n")
+            prompt_parts.append("\n")
+        
+        elif goal_type == "verify":
+            prompt_parts.append("GOAL TYPE: VERIFY\n")
+            prompt_parts.append("- Prioritize actions that reveal UI elements for validation\n")
+            prompt_parts.append("- Avoid navigating away until all criteria are checked\n")
+            prompt_parts.append("- Use scroll/swipe to reveal hidden elements if needed\n\n")
+        
+        elif goal_type == "explore_section":
+            prompt_parts.append("GOAL TYPE: EXPLORE_SECTION\n")
+            if payload.current_goal.hints and payload.current_goal.hints.avoid_actions:
+                prompt_parts.append("- AVOID these action types:\n")
+                for action in payload.current_goal.hints.avoid_actions:
+                    prompt_parts.append(f"    - {action}\n")
+            prompt_parts.append("- Stay within the current section\n")
+            prompt_parts.append("- Explore visible elements but respect boundaries\n\n")
+        
+        # Add hints if provided
+        if payload.current_goal.hints:
+            if payload.current_goal.hints.expected_screens:
+                prompt_parts.append(f"Expected screens: {', '.join(payload.current_goal.hints.expected_screens)}\n")
+            if payload.current_goal.hints.required_actions:
+                prompt_parts.append(f"Required actions: {', '.join(payload.current_goal.hints.required_actions)}\n")
+            if payload.current_goal.hints.avoid_actions:
+                prompt_parts.append(f"Actions to avoid: {', '.join(payload.current_goal.hints.avoid_actions)}\n")
+            prompt_parts.append("\n")
+        
+        prompt_parts.append(f"Steps taken for this goal: {payload.goal_progress.steps_taken if payload.goal_progress else 0}\n")
+        prompt_parts.append("=== END GOAL CONTEXT ===\n\n")
+
+    prompt_parts.append(
+        "Rules: tap-first exploration, avoid consecutive swipes, use swipe only to reveal new controls.\n"
+        "IMPORTANT: If memory_snapshot.completed_screens contains the current screen hash, navigate away — do NOT tap anything on this screen.\n"
+        "Return:\n\n"
+        "action.type (tap_xy, input_text, swipe, back, wait_ms, screenshot, stop)\n"
+        "action.params\n"
+        "intent\n"
+        "expected_outcome\n"
+        "fallback_if_fail"
+    )
+    
+    return ["".join(prompt_parts)]
 
 
 async def _phase_c_plan_one_action(state: PlannerState) -> Dict[str, Any]:
