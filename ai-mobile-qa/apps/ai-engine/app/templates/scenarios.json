@@ -1,0 +1,326 @@
+{
+  "templates": [
+    {
+      "id": "basic-login",
+      "name": "Basic Login",
+      "description": "Verify user can log in with valid credentials and reach home screen",
+      "goals": [
+        {
+          "id": "goal-1",
+          "description": "Complete login flow and reach home screen",
+          "type": "login",
+          "success_criteria": [
+            "Screen type is 'home'",
+            "User profile or account icon is visible",
+            "No error messages displayed"
+          ],
+          "hints": {
+            "expected_screens": ["login", "home"],
+            "required_actions": ["input_text:email", "input_text:password", "tap:login_button"]
+          }
+        }
+      ],
+      "estimated_steps": 7
+    },
+    {
+      "id": "login-logout",
+      "name": "Login + Logout",
+      "description": "Complete login/logout cycle to verify authentication flow",
+      "goals": [
+        {
+          "id": "goal-1",
+          "description": "Login with valid credentials",
+          "type": "login",
+          "success_criteria": [
+            "Screen type is 'home'",
+            "User is authenticated"
+          ],
+          "hints": {
+            "expected_screens": ["login", "home"]
+          }
+        },
+        {
+          "id": "goal-2",
+          "description": "Navigate to account settings and logout",
+          "type": "navigate",
+          "success_criteria": [
+            "Logout button is visible",
+            "Successfully logged out",
+            "Returned to login screen"
+          ],
+          "hints": {
+            "expected_screens": ["settings", "account", "login"],
+            "required_actions": ["tap:menu", "tap:logout"]
+          }
+        }
+      ],
+      "estimated_steps": 12
+    },
+    {
+      "id": "form-submission",
+      "name": "Form Submission",
+      "description": "Fill out and submit a form with validation",
+      "goals": [
+        {
+          "id": "goal-1",
+          "description": "Navigate to form screen",
+          "type": "navigate",
+          "success_criteria": [
+            "Form is visible",
+            "All required fields are present"
+          ],
+          "hints": {
+            "expected_screens": ["home", "form"]
+          }
+        },
+        {
+          "id": "goal-2",
+          "description": "Fill and submit form",
+          "type": "form_fill",
+          "success_criteria": [
+            "All fields filled successfully",
+            "Form submitted without errors",
+            "Success confirmation displayed"
+          ],
+          "form_data": {
+            "name": "Test User",
+            "email": "test@example.com",
+            "message": "This is a test submission"
+          }
+        }
+      ],
+      "estimated_steps": 15
+    },
+    {
+      "id": "navigation-tour",
+      "name": "Navigation Tour",
+      "description": "Visit all main sections of the app to verify navigation",
+      "goals": [
+        {
+          "id": "goal-1",
+          "description": "Navigate to Home section",
+          "type": "navigate",
+          "success_criteria": [
+            "Home screen is visible",
+            "Main content loaded"
+          ],
+          "hints": {
+            "expected_screens": ["home"]
+          }
+        },
+        {
+          "id": "goal-2",
+          "description": "Navigate to Explore section",
+          "type": "navigate",
+          "success_criteria": [
+            "Explore screen is visible",
+            "Content is displayed"
+          ],
+          "hints": {
+            "expected_screens": ["explore"]
+          }
+        },
+        {
+          "id": "goal-3",
+          "description": "Navigate to Profile section",
+          "type": "navigate",
+          "success_criteria": [
+            "Profile screen is visible",
+            "User information displayed"
+          ],
+          "hints": {
+            "expected_screens": ["profile"]
+          }
+        },
+        {
+          "id": "goal-4",
+          "description": "Navigate to Settings section",
+          "type": "navigate",
+          "success_criteria": [
+            "Settings screen is visible",
+            "Settings options are present"
+          ],
+          "hints": {
+            "expected_screens": ["settings"]
+          }
+        }
+      ],
+      "estimated_steps": 20
+    },
+    {
+      "id": "settings-verification",
+      "name": "Settings Verification",
+      "description": "Navigate to Settings and verify all options are present",
+      "goals": [
+        {
+          "id": "goal-1",
+          "description": "Navigate to Settings screen",
+          "type": "navigate",
+          "success_criteria": [
+            "Settings screen is visible",
+            "Settings title displayed"
+          ],
+          "hints": {
+            "expected_screens": ["home", "settings"],
+            "required_actions": ["tap:menu", "tap:settings"]
+          }
+        },
+        {
+          "id": "goal-2",
+          "description": "Verify all settings options are present",
+          "type": "verify",
+          "success_criteria": [
+            "Account settings option visible",
+            "Notification settings option visible",
+            "Privacy settings option visible",
+            "No overflow or rendering errors"
+          ]
+        }
+      ],
+      "estimated_steps": 8
+    },
+    {
+      "id": "search-flow",
+      "name": "Search Flow",
+      "description": "Perform search and verify results are displayed correctly",
+      "goals": [
+        {
+          "id": "goal-1",
+          "description": "Navigate to search",
+          "type": "navigate",
+          "success_criteria": [
+            "Search input is visible",
+            "Search is ready for input"
+          ],
+          "hints": {
+            "expected_screens": ["home", "search"],
+            "required_actions": ["tap:search_icon"]
+          }
+        },
+        {
+          "id": "goal-2",
+          "description": "Enter search query and view results",
+          "type": "custom",
+          "success_criteria": [
+            "Search query entered",
+            "Search results displayed",
+            "Results are relevant",
+            "No errors in results display"
+          ],
+          "hints": {
+            "required_actions": ["input_text:search", "tap:search_button"]
+          }
+        }
+      ],
+      "estimated_steps": 10
+    },
+    {
+      "id": "cart-checkout",
+      "name": "Cart Checkout",
+      "description": "Add item to cart and complete checkout flow",
+      "goals": [
+        {
+          "id": "goal-1",
+          "description": "Browse and select a product",
+          "type": "navigate",
+          "success_criteria": [
+            "Product detail screen visible",
+            "Add to cart button present"
+          ],
+          "hints": {
+            "expected_screens": ["home", "product_list", "product_detail"]
+          }
+        },
+        {
+          "id": "goal-2",
+          "description": "Add product to cart",
+          "type": "custom",
+          "success_criteria": [
+            "Product added to cart",
+            "Cart icon shows item count",
+            "Success message displayed"
+          ],
+          "hints": {
+            "required_actions": ["tap:add_to_cart"]
+          }
+        },
+        {
+          "id": "goal-3",
+          "description": "Navigate to cart",
+          "type": "navigate",
+          "success_criteria": [
+            "Cart screen visible",
+            "Product appears in cart",
+            "Checkout button present"
+          ],
+          "hints": {
+            "expected_screens": ["cart"]
+          }
+        },
+        {
+          "id": "goal-4",
+          "description": "Proceed to checkout",
+          "type": "navigate",
+          "success_criteria": [
+            "Checkout screen visible",
+            "Payment options displayed"
+          ],
+          "hints": {
+            "expected_screens": ["checkout"],
+            "required_actions": ["tap:checkout_button"]
+          }
+        }
+      ],
+      "estimated_steps": 22
+    },
+    {
+      "id": "profile-update",
+      "name": "Profile Update",
+      "description": "Navigate to profile, update user information, and save changes",
+      "goals": [
+        {
+          "id": "goal-1",
+          "description": "Navigate to profile edit screen",
+          "type": "navigate",
+          "success_criteria": [
+            "Profile edit form is visible",
+            "Current profile data displayed"
+          ],
+          "hints": {
+            "expected_screens": ["home", "profile", "profile_edit"],
+            "required_actions": ["tap:profile", "tap:edit"]
+          }
+        },
+        {
+          "id": "goal-2",
+          "description": "Update profile fields",
+          "type": "form_fill",
+          "success_criteria": [
+            "All fields updated successfully",
+            "Save button is enabled",
+            "No validation errors"
+          ],
+          "form_data": {
+            "display_name": "Updated Test User",
+            "bio": "QA automation test profile",
+            "location": "Test City"
+          }
+        },
+        {
+          "id": "goal-3",
+          "description": "Save changes and verify update",
+          "type": "verify",
+          "success_criteria": [
+            "Changes saved successfully",
+            "Success message displayed",
+            "Profile updated with new information"
+          ],
+          "hints": {
+            "required_actions": ["tap:save_button"]
+          }
+        }
+      ],
+      "estimated_steps": 20
+    }
+  ]
+}

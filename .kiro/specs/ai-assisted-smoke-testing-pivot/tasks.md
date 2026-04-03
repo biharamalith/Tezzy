@@ -215,19 +215,19 @@ Phase 1 establishes the foundation for scenario-based testing by implementing th
   - Verify constraints are enforced correctly
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 10. Enhance Phase F (Triage) to tag findings with goal context
-  - [ ] 10.1 Add goal context to IssueTriageInput schema
+- [x] 10. Enhance Phase F (Triage) to tag findings with goal context
+  - [x] 10.1 Add goal context to IssueTriageInput schema
     - Modify `ai-mobile-qa/apps/ai-engine/app/schemas/issue_triage.py`
     - Add optional `current_goal` field to `IssueTriageInput` with goal_id, description, type, and success_criteria
     - Add optional `goal_progress` field with steps_taken, criteria_met, criteria_pending
     - _Requirements: 8.1, 8.2_
 
-  - [ ] 10.2 Add goal context to IssueTriageOutput schema
+  - [x] 10.2 Add goal context to IssueTriageOutput schema
     - Modify finding structure in `IssueTriageOutput` to include optional `goal_id` and `blocks_goal` fields
     - Update `PHASE_F_ALLOWED_KEYS` to include new finding fields
     - _Requirements: 8.1, 8.3_
 
-  - [ ] 10.3 Enhance Phase F system prompt with goal-aware logic
+  - [x] 10.3 Enhance Phase F system prompt with goal-aware logic
     - Modify `_SYSTEM_PROMPT` in `ai-mobile-qa/apps/ai-engine/app/graphs/issue_triage.py`
     - Add GOAL CONTEXT RULES section explaining how to tag findings with goal_id
     - Add BLOCKS GOAL EVALUATION rules to determine if finding prevents goal completion
@@ -235,25 +235,25 @@ Phase 1 establishes the foundation for scenario-based testing by implementing th
     - If finding prevents a success criterion from being met, set `blocks_goal: true`
     - _Requirements: 8.2, 8.3, 8.4_
 
-  - [ ] 10.4 Update Phase F user prompt builder
+  - [x] 10.4 Update Phase F user prompt builder
     - Modify `build_phase_f_user_messages` function to include current_goal and goal_progress in prompt
     - Format goal context as: "Current Goal: {description} (type: {type})"
     - Include success criteria pending: "Success Criteria Pending: {criteria_pending}"
     - _Requirements: 8.1, 8.2_
 
-  - [ ] 10.5 Update run_step graph to pass goal context to Phase F
+  - [x] 10.5 Update run_step graph to pass goal context to Phase F
     - Modify `_triage_previous_step` in `ai-mobile-qa/apps/ai-engine/app/graphs/run_step.py`
     - Extract current_goal and goal_progress from `RunStepInput` (add these fields to RunStepInput schema)
     - Pass current_goal and goal_progress to `IssueTriageInput` when invoking triage graph
     - _Requirements: 8.1_
 
-  - [ ] 10.6 Update RunStepInput schema to accept goal context
+  - [x] 10.6 Update RunStepInput schema to accept goal context
     - Modify `ai-mobile-qa/apps/ai-engine/app/schemas/run_step.py`
     - Add optional `current_goal` field with goal_id, description, type, success_criteria
     - Add optional `goal_progress` field with steps_taken, criteria_met, criteria_pending
     - _Requirements: 8.1_
 
-  - [ ] 10.7 Update Desktop UI to pass goal context in aiRunStep calls
+  - [x] 10.7 Update Desktop UI to pass goal context in aiRunStep calls
     - Modify `SmokeCheckPanel.tsx` to extract current goal from scenario execution state
     - Pass `current_goal` and `goal_progress` in `aiRunStep` API calls
     - Include goal_id, description, type, and success_criteria in current_goal
