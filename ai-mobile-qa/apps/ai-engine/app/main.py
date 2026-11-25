@@ -3,6 +3,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.agent import router as agent_router
 from app.api.v1 import router as v1_router
 
 
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
 			)
 
 	app.include_router(v1_router, prefix="/v1")
+	app.include_router(agent_router, prefix="/v1")
 	return app
 
 

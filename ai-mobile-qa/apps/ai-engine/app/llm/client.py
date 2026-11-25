@@ -160,3 +160,47 @@ class LLMClient:
 			return json.loads(content)
 		except json.JSONDecodeError as e:
 			raise ValueError(f"LLM did not return valid JSON (vision): {e}\nRaw: {content}")
+
+	@property
+	def agent_model(self) -> str:
+		"""The model of the single-agent loop. It must read images: it sees every screenshot."""
+		return os.getenv("TEZZY_AGENT_MODEL", "").strip() or self._vision_model
+
+	async def chat_tools(
+		self,
+		messages: List[Dict[str, Any]],
+		tools: List[Dict[str, Any]],
+		tool_choice: Any = "required",
+		*,
+		temperature: float = 0.2,
+		timeout_s: float = 120.0,
+	) -> Dict[str, Any]:
+		"""One tool-calling turn of the agent, on the vision-capable client.
+
+		Returns a plain dict so the agent session does not depend on the SDK's types:
+		{"content": str | None, "tool_calls": [{"id", "name", "arguments"}], "usage": {...}}
+		"""
+		resp = await self._vision_client.chat.completions.create(
+			model=self.agent_model,
+			messages=messages,
+			tools=tools,
+			tool_choice=tool_choice,
+			temperature=temperature,
+			timeout=timeout_s,
+		)
+		if not resp.choices:
+			raise ValueError("LLM returned no choices")
+		msg = resp.choices[0].message
+		usage = getattr(resp, "usage", None)
+		return {
+			"content": msg.content,
+			"tool_calls": [
+				{"id": c.id, "name": c.function.name, "arguments": c.function.arguments}
+				for c in (msg.tool_calls or [])
+				if getattr(c, "function", None) is not None
+			],
+			"usage": {
+				"prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+				"completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+			},
+		}

@@ -7,6 +7,7 @@ import ScreenshotPanel from "../features/reports/ScreenshotPanel";
 import InspectorPanel from "../features/explorer/InspectorPanel";
 import SmokeCheckPanel from "../features/sessions/SmokeCheckPanel";
 import ScenarioBuilderPanel from "../features/sessions/ScenarioBuilderPanel";
+import AgentPanel from "../features/agent/AgentPanel";
 import {
     Device,
     DeviceState,
@@ -35,12 +36,13 @@ const DIM       = "#6E7681";
 const GHOST     = "#4a5568";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
-type CenterTab = "preview" | "automation" | "smokecheck" | "scenarios" | "inspector";
+type CenterTab = "preview" | "automation" | "agent" | "smokecheck" | "scenarios" | "inspector";
 type RightTab  = "log" | "inspector";
 
 const NAV: { id: CenterTab; label: string; dot: string }[] = [
     { id: "preview",    label: "Live Preview", dot: ACCENT   },
     { id: "automation", label: "Automation",   dot: SUCCESS  },
+    { id: "agent",      label: "AI Agent",     dot: ACCENT   },
     { id: "smokecheck", label: "Smoke Check",  dot: WARN     },
     { id: "scenarios",  label: "Scenarios",    dot: "#FF7B72" },
     { id: "inspector",  label: "Inspector",    dot: "#58A6FF" },
@@ -134,6 +136,16 @@ function GridIcon({ color = ACCENT }: { color?: string }) {
     );
 }
 
+// Spark SVG (AI agent)
+function SparkIcon({ color = ACCENT }: { color?: string }) {
+    return (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+            stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 3l1.9 5.6L19.5 10.5l-5.6 1.9L12 18l-1.9-5.6L4.5 10.5l5.6-1.9z" />
+        </svg>
+    );
+}
+
 function MapIcon({ color = ACCENT }: { color?: string }) {
     return (
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
@@ -148,6 +160,7 @@ function MapIcon({ color = ACCENT }: { color?: string }) {
 function navIcon(id: CenterTab, color: string) {
     if (id === "preview")    return <PhoneIcon color={color} />;
     if (id === "automation") return <PlayIcon color={color} />;
+    if (id === "agent")      return <SparkIcon color={color} />;
     if (id === "smokecheck") return <ActivityIcon color={color} />;
     if (id === "scenarios")  return <MapIcon color={color} />;
     return <GridIcon color={color} />;
@@ -536,6 +549,20 @@ export default function Layout() {
                                 prefillTap={prefillTap}
                                 onPrefillConsumed={() => setPrefillTap(null)}
                             />
+                        </div>
+                        <div style={{ flexShrink: 0 }}>
+                            <ScreenshotPanel />
+                        </div>
+                    </div>
+
+                    {/* AI Agent tab */}
+                    <div style={{
+                        display: centerTab === "agent" ? "flex" : "none",
+                        flexDirection: "column", flex: 1,
+                        overflow: "auto", padding: 16, gap: 12,
+                    }}>
+                        <div style={{ flexShrink: 0 }}>
+                            <AgentPanel />
                         </div>
                         <div style={{ flexShrink: 0 }}>
                             <ScreenshotPanel />

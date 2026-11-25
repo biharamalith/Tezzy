@@ -272,7 +272,8 @@ pub async fn input_text(
     let port = port.unwrap_or(DEFAULT_PORT);
     let url = format!("http://127.0.0.1:{}/session/{}/keys", port, session_id);
 
-    emit_log(app, LogLevel::Info, format!("[appium-client] Input text: {}", text)).ok();
+    // Only the length: typed text can be a test password.
+    emit_log(app, LogLevel::Info, format!("[appium-client] Input text ({} chars)", text.chars().count())).ok();
 
     // W3C WebDriver expects `value` (array of strings). Some servers also accept `text`.
     let value: Vec<String> = text.chars().map(|c| c.to_string()).collect();

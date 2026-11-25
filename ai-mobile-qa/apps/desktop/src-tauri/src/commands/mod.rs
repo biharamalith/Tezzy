@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod apk;
 pub mod ai_engine;
 pub mod appium;

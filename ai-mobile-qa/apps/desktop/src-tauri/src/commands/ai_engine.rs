@@ -50,7 +50,7 @@ async fn post_json_once(path: &str, payload: &Value) -> Result<Value, String> {
 		.map_err(|e| format!("AI engine returned non-JSON: {}\nRaw: {}", e, text))
 }
 
-async fn post_json_with_start(app: &AppHandle, path: &str, payload: &Value) -> Result<Value, String> {
+pub(crate) async fn post_json_with_start(app: &AppHandle, path: &str, payload: &Value) -> Result<Value, String> {
 	match post_json_once(path, payload).await {
 		Ok(value) => Ok(value),
 		Err(err) if is_connection_refused(&err) => {

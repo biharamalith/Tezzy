@@ -338,6 +338,61 @@ export async function listenRunProgress(
     return listen<RunProgressEvent>("tezzy:run_progress", (e) => handler(e.payload));
 }
 
+// ── Single-agent AI test ──────────────────────────────────────────────────
+
+export type AgentRunOptions = {
+    appName?: string;
+    goal?: string;
+    persona?: string;
+    notes?: string;
+    email?: string;
+    password?: string;
+    maxActions?: number;
+    stepDelayMs?: number;
+};
+
+export type AgentTurnEvent = {
+    run_id: string;
+    step: number;
+    max_actions: number;
+    actions_taken: number;
+    status: "observing" | "action" | "done" | "error";
+    action?: string | null;
+    thought?: string | null;
+    screen_id?: string | null;
+    new_screen: boolean;
+    findings_count: number;
+    screenshot?: string | null;
+};
+
+export type AgentRunResult = {
+    run_id: string;
+    run_dir: string;
+    model: string;
+    end_reason: "finished" | "budget" | "stopped" | "session_lost" | "error" | string;
+    steps: number;
+    actions_taken: number;
+    findings_count: number;
+    screens_reached: number;
+    goal_reached?: "yes" | "partly" | "no" | null;
+    score?: number | null;
+    summary?: string | null;
+    report_path?: string | null;
+    error?: string | null;
+};
+
+export async function invokeRunAiAgent(options: AgentRunOptions): Promise<AgentRunResult> {
+    return invoke<AgentRunResult>("run_ai_agent_cmd", { options });
+}
+
+export function invokeStopAiAgent(): void {
+    invoke("stop_ai_agent_cmd").catch(() => {});
+}
+
+export async function listenAgentTurn(handler: (event: AgentTurnEvent) => void): Promise<UnlistenFn> {
+    return listen<AgentTurnEvent>("tezzy:agent_turn", (e) => handler(e.payload));
+}
+
 export type ScreenshotTakenEvent = {
     path: string;
     ts: number;

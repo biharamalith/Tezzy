@@ -15,6 +15,8 @@ fn main() {
 			commands::ai_engine::ai_session_bootstrap_cmd,
 			commands::ai_engine::ai_run_step_cmd,
 			commands::ai_engine::ai_vision_screenshot_cmd,
+			commands::agent::run_ai_agent_cmd,
+			commands::agent::stop_ai_agent_cmd,
 			commands::scrcpy::start_scrcpy_preview,
 			commands::scrcpy::stop_scrcpy_preview,
 			commands::scrcpy::get_scrcpy_preview_status,
