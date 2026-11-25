@@ -312,7 +312,27 @@ pub async fn action_input(app: AppHandle, text: String) -> Result<String, String
 	}
 }
 
-/// Takes a screenshot and saves to artifacts.
+/// Clears the currently focused input field (Ctrl+A then Delete).
+/// Must be called AFTER the field has been tapped/focused.
+/// Returns Ok regardless — clear is best-effort so typing can still proceed.
+#[tauri::command]
+pub async fn action_clear_field(app: AppHandle) -> Result<String, String> {
+	emit_log(&app, LogLevel::Info, "[command] Action: Clear focused field").ok();
+
+	let session = match get_or_recover_session(&app).await {
+		Ok(s) => s,
+		Err(e) => {
+			emit_log(&app, LogLevel::Warn, format!("[command] Clear field: no session (skipped): {}", e)).ok();
+			return Ok("clear_field: no session (skipped)".to_string());
+		}
+	};
+
+	// Best-effort — errors are silently ignored so typing still proceeds
+	let _ = appium_client::clear_focused_field(&app, &session.session_id, None).await;
+	Ok("Field cleared".to_string())
+}
+
+
 #[tauri::command]
 pub async fn action_screenshot(app: AppHandle) -> Result<String, String> {
 	emit_log(&app, LogLevel::Info, "[command] Action: Screenshot").ok();

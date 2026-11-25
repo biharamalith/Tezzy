@@ -34,6 +34,11 @@ _SYSTEM_PROMPT = (
     "  (5) REJECT if proposed action type is in avoid_actions.\n"
     "  (6) REJECT if action would navigate away from required_screens before goal completion.\n"
     "  (7) REJECT if steps_taken >= max_steps for current goal.\n\n"
+    "GOAL-DIRECTED NO-ESCAPE RULE: If goal_type is one of "
+    "[form_fill, verify, explore_section, custom] and the proposed action is 'back' "
+    "or is a tap that would switch to a different bottom-nav tab:\n"
+    "  REJECT immediately. The agent must stay on the current screen to complete the goal.\n"
+    "  Alternative: provide {\"type\": \"wait_ms\", \"params\": {\"ms\": 300}} so the planner retries.\n\n"
     "ALWAYS APPROVE: Never reject an 'input_text' action — form filling must always proceed.\n\n"
     "When rejecting, set decision='reject', explain in rejection_reason_or_null, "
     "and provide a concrete alternative in final_action (prefer back, swipe, or a different tap target).\n"
@@ -55,6 +60,15 @@ def build_phase_d_user_messages(payload: CriticGateInput) -> list[str]:
         f"failure_streak: {payload.failure_streak}\n"
         f"mode: {payload.mode}\n"
     )
+
+    if payload.goal_type:
+        prompt += f"goal_type: {payload.goal_type}\n"
+        stay_types = {"form_fill", "verify", "explore_section", "custom"}
+        if payload.goal_type in stay_types:
+            prompt += (
+                "⛔ STAY-ON-SCREEN GOAL: The agent must NOT use 'back' or switch nav tabs. "
+                "Reject any such action.\n"
+            )
     
     # Add goal constraints if provided
     if payload.goal_constraints:
@@ -80,7 +94,24 @@ def build_phase_d_user_messages(payload: CriticGateInput) -> list[str]:
 async def _phase_d_gate_action(state: CriticGateState) -> Dict[str, Any]:
     payload = state["input"]
     
-    # Programmatic constraint validation (before LLM call for efficiency)
+    # ── Programmatic constraint validation (before LLM call for efficiency) ───
+    
+    # HARD BLOCK: if goal requires staying on screen, back/escape is forbidden
+    _STAY_ON_SCREEN_GOALS = {"form_fill", "verify", "explore_section", "custom"}
+    if payload.goal_type in _STAY_ON_SCREEN_GOALS:
+        action_type = payload.proposed_action.get("type", "")
+        if action_type == "back":
+            output = CriticGateOutput(
+                decision="reject",
+                final_action={"type": "wait_ms", "params": {"ms": 300}},
+                rejection_reason_or_null=(
+                    f"GOAL-DIRECTED NO-ESCAPE: action 'back' is forbidden during "
+                    f"'{payload.goal_type}' goal — agent must stay on current screen"
+                ),
+                recovery_tag="normal"
+            )
+            return {"output": output}
+
     if payload.goal_constraints:
         constraints = payload.goal_constraints
         proposed_action = payload.proposed_action

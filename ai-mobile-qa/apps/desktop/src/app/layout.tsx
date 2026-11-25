@@ -6,6 +6,7 @@ import SessionPanel from "../features/sessions/SessionPanel";
 import ScreenshotPanel from "../features/reports/ScreenshotPanel";
 import InspectorPanel from "../features/explorer/InspectorPanel";
 import SmokeCheckPanel from "../features/sessions/SmokeCheckPanel";
+import ScenarioBuilderPanel from "../features/sessions/ScenarioBuilderPanel";
 import {
     Device,
     DeviceState,
@@ -34,13 +35,14 @@ const DIM       = "#6E7681";
 const GHOST     = "#4a5568";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
-type CenterTab = "preview" | "automation" | "smokecheck" | "inspector";
+type CenterTab = "preview" | "automation" | "smokecheck" | "scenarios" | "inspector";
 type RightTab  = "log" | "inspector";
 
 const NAV: { id: CenterTab; label: string; dot: string }[] = [
     { id: "preview",    label: "Live Preview", dot: ACCENT   },
     { id: "automation", label: "Automation",   dot: SUCCESS  },
     { id: "smokecheck", label: "Smoke Check",  dot: WARN     },
+    { id: "scenarios",  label: "Scenarios",    dot: "#FF7B72" },
     { id: "inspector",  label: "Inspector",    dot: "#58A6FF" },
 ];
 
@@ -132,10 +134,22 @@ function GridIcon({ color = ACCENT }: { color?: string }) {
     );
 }
 
+function MapIcon({ color = ACCENT }: { color?: string }) {
+    return (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+            stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21" />
+            <line x1="9" y1="3" x2="9" y2="18" />
+            <line x1="15" y1="6" x2="15" y2="21" />
+        </svg>
+    );
+}
+
 function navIcon(id: CenterTab, color: string) {
     if (id === "preview")    return <PhoneIcon color={color} />;
     if (id === "automation") return <PlayIcon color={color} />;
     if (id === "smokecheck") return <ActivityIcon color={color} />;
+    if (id === "scenarios")  return <MapIcon color={color} />;
     return <GridIcon color={color} />;
 }
 
@@ -147,6 +161,8 @@ export default function Layout() {
     const [adbOk,            setAdbOk]            = useState(false);
     const [rightTab,         setRightTab]         = useState<RightTab>("log");
     const [centerTab,        setCenterTab]        = useState<CenterTab>("preview");
+    const [smokeScenarioPrefillId, setSmokeScenarioPrefillId] = useState<string | null>(null);
+    const [smokeScenarioPrefillSignal, setSmokeScenarioPrefillSignal] = useState(0);
     const [prefillTap,       setPrefillTap]       = useState<{ x: number; y: number } | null>(null);
     const [narrow,           setNarrow]           = useState(window.innerWidth < 780);
 
@@ -533,11 +549,30 @@ export default function Layout() {
                         overflow: "auto", padding: 16, gap: 12,
                     }}>
                         <div style={{ flexShrink: 0 }}>
-                            <SmokeCheckPanel />
+                            <SmokeCheckPanel
+                                prefillScenarioId={smokeScenarioPrefillId}
+                                prefillScenarioSignal={smokeScenarioPrefillSignal}
+                            />
                         </div>
                         <div style={{ flexShrink: 0 }}>
                             <ScreenshotPanel />
                         </div>
+                    </div>
+
+                    {/* Scenarios tab */}
+                    <div style={{
+                        display: centerTab === "scenarios" ? "flex" : "none",
+                        flexDirection: "column", flex: 1,
+                        overflow: "hidden",
+                    }}>
+                        <ScenarioBuilderPanel
+                            onRunScenario={(scenario) => {
+                                // Pass exact scenario context into Smoke Check when the user presses Run.
+                                setSmokeScenarioPrefillId(scenario.id);
+                                setSmokeScenarioPrefillSignal((v) => v + 1);
+                                setCenterTab("smokecheck");
+                            }}
+                        />
                     </div>
 
                     {/* Inspector tab */}

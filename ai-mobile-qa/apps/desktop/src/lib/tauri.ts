@@ -175,6 +175,10 @@ export async function invokeActionInput(text: string): Promise<string> {
     return invoke<string>("action_input", { text });
 }
 
+export async function invokeActionClearField(): Promise<string> {
+    return invoke<string>("action_clear_field");
+}
+
 export async function invokeActionScreenshot(): Promise<string> {
     return invoke<string>("action_screenshot");
 }

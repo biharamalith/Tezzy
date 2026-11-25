@@ -69,6 +69,21 @@ export interface ScenarioGoal {
   
   /** Form data for form_fill goals (field name -> value) */
   form_data?: Record<string, string>;
+
+  /**
+   * Keywords that must appear on-screen before this goal starts.
+   * The agent uses these to verify it is on the correct starting screen
+   * (matched against UI element text/resource_id AND screenshot summary).
+   * e.g. ["Profile", "Edit Profile"] for a profile update goal.
+   */
+  start_screen_keywords?: string[];
+
+  /**
+   * Label/text of the bottom-nav tab or menu item to tap to reach the start screen.
+   * If provided, the agent taps this element FIRST before checking keywords.
+   * e.g. "Profile", "Settings", "Home"
+   */
+  start_nav_tap_label?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

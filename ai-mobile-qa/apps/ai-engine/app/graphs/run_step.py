@@ -178,6 +178,8 @@ async def _plan_next_action(state: RunStepState) -> Dict[str, Any]:
         screen_size=screen_size,
         credentials=inp.credentials,
         attempt_counters=attempt_counters,
+        current_goal=inp.current_goal,
+        goal_progress=inp.goal_progress,
     )
     res = await graph.ainvoke({"input": plan_input})
     return {"plan": res["output"].model_dump()}
@@ -188,6 +190,23 @@ async def _critic_gate(state: RunStepState) -> Dict[str, Any]:
     plan = state.get("plan") or {}
     proposed_action = plan.get("action") or {}
 
+    # Extract goal type for no-escape enforcement
+    current_goal = inp.current_goal
+    goal_type: str | None = None
+    if current_goal is not None:
+        if hasattr(current_goal, "type"):
+            goal_type = str(current_goal.type)
+        elif isinstance(current_goal, dict):
+            goal_type = str(current_goal.get("type") or "")
+
+    # Extract screen height for bottom-nav detection
+    raw_size = inp.screen_size or {}
+    screen_height: int | None = None
+    if isinstance(raw_size, dict):
+        h = raw_size.get("h") or raw_size.get("height")
+        if isinstance(h, int) and h > 0:
+            screen_height = h
+
     graph = get_critic_gate_graph()
     gate_input = CriticGateInput(
         proposed_action=proposed_action,
@@ -196,6 +215,8 @@ async def _critic_gate(state: RunStepState) -> Dict[str, Any]:
         recent_actions=inp.recent_actions[-10:],
         failure_streak=inp.failure_streak,
         mode=inp.mode,
+        goal_type=goal_type,
+        screen_height=screen_height,
     )
     res = await graph.ainvoke({"input": gate_input})
     critic = res["output"].model_dump()

@@ -371,7 +371,7 @@ pub async fn run_smoke_check(
 		if let Some(ref path_str) = saved_screenshot {
 			if let Ok(png_bytes) = std::fs::read(path_str) {
 				let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-				if let Some(vision_result) = vision_analyze_screenshot(&b64, step_num, &current_hash).await {
+				if let Some(vision_result) = vision_analyze_screenshot(app, &b64, step_num, &current_hash).await {
 					// Log a summary of what vision detected
 					let vision_summary = vision_result
 						.get("summary")

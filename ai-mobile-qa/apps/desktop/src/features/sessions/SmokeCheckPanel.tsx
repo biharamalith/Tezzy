@@ -6,6 +6,7 @@ import {
     invokeActionTap,
     invokeActionBack,
     invokeActionInput,
+    invokeActionClearField,
     invokeActionSwipe,
     invokeActionScreenshot,
     invokeAiVisionScreenshot,
@@ -19,8 +20,18 @@ import {
     UnlistenFn,
 } from "../../lib/tauri";
 
-import { aiRunStep } from "../../lib/aiEngine";
-import type { ActionRecord, ScenarioExecutionState, GoalProgress } from "../../types/scenario";
+import { aiRunStep, aiSessionBootstrap } from "../../lib/aiEngine";
+import {
+    listScenarios,
+    validateAndSaveScenario,
+} from "../../lib/scenarioStorage";
+import type {
+    ActionRecord,
+    ScenarioExecutionState,
+    GoalProgress,
+    SmokeScenario,
+    ScenarioGoal,
+} from "../../types/scenario";
 import {
     saveExecutionState,
     deleteExecutionState,
@@ -34,6 +45,11 @@ import {
     formatConstraintViolation,
     createConstraintViolationFinding,
 } from "../../lib/scenarioConstraints";
+
+type SmokeCheckPanelProps = {
+    prefillScenarioId?: string | null;
+    prefillScenarioSignal?: number;
+};
 
 const accent = "#9D7BFF";
 const warn = "#E3B341";
@@ -257,6 +273,92 @@ function buildNavigationRecoveryAction(
     };
 }
 
+/**
+ * Infer navigation keywords from ANY goal type — used for universal pre-nav.
+ * Works for navigate, form_fill, verify, explore_section, custom, login.
+ */
+function inferGoalNavKeywords(goal: ScenarioGoal | null): string[] {
+    if (!goal) return [];
+
+    const keywords = new Set<string>();
+    const STOP_WORDS = new Set(["the", "and", "for", "with", "this", "that", "from", "screen", "page", "view", "goal"]);
+
+    const pushWords = (value: string) => {
+        const normalized = value
+            .toLowerCase()
+            .replace(/[_-]+/g, " ")
+            .replace(/[^a-z0-9\s]/g, " ");
+        for (const word of normalized.split(/\s+/)) {
+            if (word.length >= 3 && !STOP_WORDS.has(word)) keywords.add(word);
+        }
+    };
+
+    pushWords(goal.description ?? "");
+    for (const screen of goal.hints?.expected_screens ?? []) pushWords(screen);
+    for (const action of goal.hints?.required_actions ?? []) {
+        const lower = String(action ?? "").toLowerCase().trim();
+        const tapPrefix = "tap:";
+        pushWords(lower.startsWith(tapPrefix) ? lower.slice(tapPrefix.length) : lower);
+    }
+    // Also include explicit keywords if set
+    for (const kw of goal.start_screen_keywords ?? []) pushWords(kw);
+
+    return Array.from(keywords);
+}
+
+// Keep backward-compat name used by buildGoalDirectedNavigationAction
+function collectGoalNavigationKeywords(goal: ScenarioGoal | null): string[] {
+    return inferGoalNavKeywords(goal);
+}
+
+function buildGoalDirectedNavigationAction(
+    goal: ScenarioGoal | null,
+    sameHashCount: number,
+    uiElements: Array<any>,
+    screenSize?: { width: number; height: number },
+): { type: string; params: Record<string, unknown> } | null {
+    // Works for ALL goal types — navigate, form_fill, verify, explore_section, custom
+    if (!goal) return null;
+
+    const goalKeywords = collectGoalNavigationKeywords(goal);
+    if (goalKeywords.length === 0) return null;
+
+    const h = Math.max(640, Number(screenSize?.height ?? 1920));
+    const minBottomY = Math.floor(h * 0.76);
+
+    const bottomNavGoalTarget = pickElementByKeywords(uiElements, goalKeywords, { minY: minBottomY });
+    if (bottomNavGoalTarget) {
+        return {
+            type: "tap_xy",
+            params: { x: Math.floor(bottomNavGoalTarget.x), y: Math.floor(bottomNavGoalTarget.y) },
+        };
+    }
+
+    const visibleGoalTarget = pickElementByKeywords(uiElements, goalKeywords, { minY: 0 });
+    if (visibleGoalTarget) {
+        return {
+            type: "tap_xy",
+            params: { x: Math.floor(visibleGoalTarget.x), y: Math.floor(visibleGoalTarget.y) },
+        };
+    }
+
+    if (sameHashCount >= 2) {
+        const drawerTarget = pickElementByKeywords(
+            uiElements,
+            ["menu", "drawer", "navigation", "hamburger", "open navigation"],
+            { minY: 0 },
+        );
+        if (drawerTarget) {
+            return {
+                type: "tap_xy",
+                params: { x: Math.floor(drawerTarget.x), y: Math.floor(drawerTarget.y) },
+            };
+        }
+    }
+
+    return null;
+}
+
 const OVERFLOW_MATCHERS = [
     "a renderflex overflowed",
     "renderflex overflowed",
@@ -363,9 +465,249 @@ function detectFlutterOverflowFromElements(
     };
 }
 
+function buildStarterScenario(appName: string): SmokeScenario {
+    const goal: ScenarioGoal = {
+        id: "goal-1",
+        description: "Navigate to the main screen",
+        type: "navigate",
+        success_criteria: [
+            "Main screen is visible",
+            "Primary navigation is available",
+        ],
+        hints: {
+            expected_screens: ["home", "main", "dashboard"],
+            required_actions: ["tap:home", "tap:continue"],
+        },
+    };
+
+    return {
+        id: `scenario-${Date.now().toString(36)}`,
+        name: "New Scenario",
+        description: "Starter scenario created from Smoke Check",
+        app_name: appName.trim() || "com.example.app",
+        goals: [goal],
+        constraints: {
+            max_steps_per_goal: 20,
+            timeout_seconds: 300,
+            stop_on_first_failure: false,
+        },
+    };
+}
+
+/**
+ * Checks whether the current screen contains any of the goal's start_screen_keywords.
+ * Searches through UI element text fields AND the screenshot summary string.
+ *
+ * Returns false (not matched) when no keywords are given so that the pre-nav
+ * phase always attempts navigation rather than assuming it's already in position.
+ */
+function screenMatchesKeywords(
+    keywords: string[],
+    uiElements: any[],
+    screenshotSummary: string | null,
+): boolean {
+    if (!keywords.length) return false; // no keywords → can't confirm screen, attempt nav
+    const lowerKws = keywords.map(k => k.toLowerCase());
+    const haystack = [
+        ...(uiElements ?? []).flatMap((el: any) => [
+            el?.text, el?.content_desc, el?.resource_id, el?.hint, el?.label,
+        ]),
+        screenshotSummary,
+    ].map(v => String(v ?? "").toLowerCase()).join(" ");
+    return lowerKws.some(kw => kw && haystack.includes(kw));
+}
+
+/**
+ * Returns bottom-nav tab elements sorted LEFT → RIGHT by X coordinate.
+ * "Bottom nav" = clickable elements in the bottom 24% of the screen.
+ */
+function getBottomNavTabsOrdered(elements: any[], screenHeight: number): any[] {
+    const minY = Math.floor(screenHeight * 0.76);
+    return elements
+        .filter((el: any) => {
+            const cy = Number(el?.center_y ?? el?.y ?? 0);
+            const clickable = String(el?.clickable ?? "").toLowerCase() === "true";
+            return cy >= minY && clickable;
+        })
+        .sort((a, b) => Number(a.center_x ?? a.x ?? 0) - Number(b.center_x ?? b.x ?? 0));
+}
+
+/**
+ * Returns the sidebar/hamburger button if visible (top-left area of screen).
+ */
+function findSidebarToggle(elements: any[], screenHeight: number): any | null {
+    const maxY = Math.floor(screenHeight * 0.18);
+    const sidebarKeywords = ["menu", "drawer", "navigation", "hamburger", "sidebar", "nav_drawer"];
+    for (const el of elements) {
+        const cy = Number(el?.center_y ?? el?.y ?? 0);
+        const cx = Number(el?.center_x ?? el?.x ?? 0);
+        if (cy > maxY) continue;
+        const txt = [el?.text, el?.content_desc, el?.resource_id, el?.class]
+            .map((v: any) => String(v ?? "").toLowerCase()).join(" ");
+        if (sidebarKeywords.some(kw => txt.includes(kw))) {
+            if (Number.isFinite(cx) && Number.isFinite(cy)) return el;
+        }
+    }
+    // Fallback: any clickable element in the top-left corner
+    for (const el of elements) {
+        const cy = Number(el?.center_y ?? el?.y ?? 0);
+        const cx = Number(el?.center_x ?? el?.x ?? 0);
+        const clickable = String(el?.clickable ?? "").toLowerCase() === "true";
+        if (cy <= maxY && cx <= 120 && clickable && Number.isFinite(cx) && Number.isFinite(cy)) {
+            return el;
+        }
+    }
+    return null;
+}
+
+/**
+ * Navigates to the goal's start screen in at most 4 targeted steps.
+ *
+ * Strategy (strictly in order, no random taps):
+ *   0. Check keywords — if already on start screen, done (0 steps).
+ *   1. If start_nav_tap_label set → find & tap that exact nav element.
+ *   2. Walk bottom-nav tabs LEFT → RIGHT, one per step. Check after each.
+ *   3. Try sidebar/hamburger toggle. Check after.
+ *   4. Press back ONCE as last resort. Check after.
+ *
+ * Stops as soon as keywords match. Returns steps consumed.
+ */
+async function navigateToGoalStartScreen(
+    goal: ScenarioGoal,
+    getSnapshot: () => Promise<{ ui_elements: any[]; screen_hash: string; screen_size: { width: number; height: number } }>,
+    doTap: (x: number, y: number) => Promise<void>,
+    doBack: () => Promise<void>,
+    sleep: (ms: number) => Promise<void>,
+    logStep: (msg: string) => void,
+): Promise<number> {
+    const MAX_STEPS = 4;
+    const keywords = goal.start_screen_keywords ?? [];
+    const navLabel = (goal.start_nav_tap_label ?? "").toLowerCase().trim();
+
+    // ── Phase 0: already on start screen? ────────────────────────────────────
+    let snap = await getSnapshot();
+    if (screenMatchesKeywords(keywords, snap.ui_elements as any[], null)) {
+        logStep(`[nav] Already on start screen — skipping pre-nav`);
+        return 0;
+    }
+
+    let stepsUsed = 0;
+
+    // ── Phase 1: tap the exact label the user specified ───────────────────────
+    if (navLabel && stepsUsed < MAX_STEPS) {
+        const elements = snap.ui_elements as any[];
+        const match = elements.find((el: any) => {
+            const txt = [el?.text, el?.content_desc, el?.resource_id]
+                .map((v: any) => String(v ?? "").toLowerCase()).join(" ");
+            return txt.includes(navLabel);
+        });
+        if (match) {
+            const cx = Number(match.center_x ?? match.x);
+            const cy = Number(match.center_y ?? match.y);
+            if (Number.isFinite(cx) && Number.isFinite(cy)) {
+                logStep(`[nav] Step ${stepsUsed + 1}: Tapping "${goal.start_nav_tap_label}" at (${cx},${cy})`);
+                await doTap(cx, cy);
+                stepsUsed++;
+                await sleep(700);
+                snap = await getSnapshot();
+                if (screenMatchesKeywords(keywords, snap.ui_elements as any[], null)) {
+                    logStep(`[nav] ✓ Found after tapping "${goal.start_nav_tap_label}"`);
+                    return stepsUsed;
+                }
+            }
+        }
+    }
+
+    // ── Phase 2: walk bottom-nav tabs LEFT → RIGHT ────────────────────────────
+    if (stepsUsed < MAX_STEPS) {
+        snap = await getSnapshot();
+        const tabs = getBottomNavTabsOrdered(snap.ui_elements as any[], snap.screen_size.height);
+        for (const tab of tabs) {
+            if (stepsUsed >= MAX_STEPS) break;
+            const cx = Number(tab.center_x ?? tab.x);
+            const cy = Number(tab.center_y ?? tab.y);
+            if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+            const label = tab.text || tab.content_desc || `(${cx},${cy})`;
+            logStep(`[nav] Step ${stepsUsed + 1}: Bottom nav → "${label}" at (${cx},${cy})`);
+            await doTap(cx, cy);
+            stepsUsed++;
+            await sleep(700);
+            snap = await getSnapshot();
+            if (screenMatchesKeywords(keywords, snap.ui_elements as any[], null)) {
+                logStep(`[nav] ✓ Found after tapping bottom nav "${label}"`);
+                return stepsUsed;
+            }
+        }
+    }
+
+    // ── Phase 3: try sidebar/hamburger ────────────────────────────────────────
+    if (stepsUsed < MAX_STEPS) {
+        snap = await getSnapshot();
+        const sidebar = findSidebarToggle(snap.ui_elements as any[], snap.screen_size.height);
+        if (sidebar) {
+            const cx = Number(sidebar.center_x ?? sidebar.x);
+            const cy = Number(sidebar.center_y ?? sidebar.y);
+            logStep(`[nav] Step ${stepsUsed + 1}: Opening sidebar at (${cx},${cy})`);
+            await doTap(cx, cy);
+            stepsUsed++;
+            await sleep(700);
+            snap = await getSnapshot();
+            if (screenMatchesKeywords(keywords, snap.ui_elements as any[], null)) {
+                logStep(`[nav] ✓ Found after opening sidebar`);
+                return stepsUsed;
+            }
+            // If sidebar opened, look for keyword match inside menu items
+            if (keywords.length > 0 && stepsUsed < MAX_STEPS) {
+                const elements = snap.ui_elements as any[];
+                const menuMatch = elements.find((el: any) => {
+                    const txt = [el?.text, el?.content_desc, el?.resource_id]
+                        .map((v: any) => String(v ?? "").toLowerCase()).join(" ");
+                    const clickable = String(el?.clickable ?? "").toLowerCase() === "true";
+                    return clickable && keywords.some(kw => txt.includes(kw.toLowerCase()));
+                });
+                if (menuMatch) {
+                    const cx2 = Number(menuMatch.center_x ?? menuMatch.x);
+                    const cy2 = Number(menuMatch.center_y ?? menuMatch.y);
+                    const lbl = menuMatch.text || menuMatch.content_desc || "";
+                    logStep(`[nav] Step ${stepsUsed + 1}: Tapping sidebar item "${lbl}" at (${cx2},${cy2})`);
+                    await doTap(cx2, cy2);
+                    stepsUsed++;
+                    await sleep(700);
+                    snap = await getSnapshot();
+                    if (screenMatchesKeywords(keywords, snap.ui_elements as any[], null)) {
+                        logStep(`[nav] ✓ Found via sidebar item "${lbl}"`);
+                        return stepsUsed;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Phase 4: back once (absolute last resort) ─────────────────────────────
+    if (stepsUsed < MAX_STEPS && keywords.length > 0) {
+        logStep(`[nav] Step ${stepsUsed + 1}: Back (last resort)`);
+        await doBack();
+        stepsUsed++;
+        await sleep(500);
+        snap = await getSnapshot();
+        if (screenMatchesKeywords(keywords, snap.ui_elements as any[], null)) {
+            logStep(`[nav] ✓ Found after back`);
+            return stepsUsed;
+        }
+    }
+
+    logStep(`[nav] ⚠ Start screen not confirmed in ${stepsUsed} step(s) — proceeding`);
+    return stepsUsed;
+}
+
+
+
 // ── component ─────────────────────────────────────────────────────────────────
 
-export default function SmokeCheckPanel() {
+export default function SmokeCheckPanel({
+    prefillScenarioId = null,
+    prefillScenarioSignal = 0,
+}: SmokeCheckPanelProps) {
     const [running, setRunning] = useState(false);
     const [maxSteps, setMaxSteps] = useState(20);
     const [delayMs, setDelayMs] = useState(1500);
@@ -373,6 +715,12 @@ export default function SmokeCheckPanel() {
     const [progress, setProgress] = useState<RunProgressEvent[]>([]);
     const [result, setResult] = useState<SmokeCheckResult | null>(null);
     const [errMsg, setErrMsg] = useState<string | null>(null);
+    const [scenarioMode, setScenarioMode] = useState<"autonomous" | "scenario">("autonomous");
+    const [scenarios, setScenarios] = useState<SmokeScenario[]>([]);
+    const [selectedScenarioId, setSelectedScenarioId] = useState<string>("");
+    const [scenarioLoading, setScenarioLoading] = useState(false);
+    const [scenarioBusy, setScenarioBusy] = useState(false);
+    const [scenarioError, setScenarioError] = useState<string | null>(null);
     const [incompleteRuns, setIncompleteRuns] = useState<Array<{
         run_id: string;
         scenario_name: string;
@@ -393,6 +741,49 @@ export default function SmokeCheckPanel() {
     const noElementCount = useRef<number>(0);
     const completedScreens = useRef<Set<string>>(new Set());
     const recentActionsRef = useRef<ActionRecord[]>([]);
+    const selectedScenario = scenarios.find((scenario) => scenario.id === selectedScenarioId) ?? null;
+    const selectedScenarioGoal = selectedScenario?.goals?.[0] ?? null;
+
+    const refreshScenarios = async (preserveSelection = true, preferredScenarioId: string | null = null) => {
+        setScenarioLoading(true);
+        setScenarioError(null);
+        try {
+            const loaded = await listScenarios();
+            const sorted = [...loaded].sort((a, b) => a.name.localeCompare(b.name));
+            setScenarios(sorted);
+            setSelectedScenarioId((current) => {
+                if (preferredScenarioId && sorted.some((scenario) => scenario.id === preferredScenarioId)) {
+                    return preferredScenarioId;
+                }
+                if (preserveSelection && current && sorted.some((scenario) => scenario.id === current)) {
+                    return current;
+                }
+                return sorted[0]?.id ?? "";
+            });
+        } catch (err) {
+            setScenarios([]);
+            setSelectedScenarioId("");
+            setScenarioError(String(err));
+        } finally {
+            setScenarioLoading(false);
+        }
+    };
+
+    const createScenarioFromUi = async () => {
+        setScenarioBusy(true);
+        setScenarioError(null);
+        try {
+            const starter = buildStarterScenario(selectedScenario?.app_name ?? "com.example.app");
+            await validateAndSaveScenario(starter);
+            await refreshScenarios(false);
+            setSelectedScenarioId(starter.id);
+            setScenarioMode("scenario");
+        } catch (err) {
+            setScenarioError(String(err));
+        } finally {
+            setScenarioBusy(false);
+        }
+    };
 
     function sleep(ms: number) {
         return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -431,9 +822,11 @@ export default function SmokeCheckPanel() {
             );
         };
 
+        // Sort by center_y ascending (top-to-bottom) so we always start from topmost field
         const editFields = elements
             .filter((el) => el && typeof el === "object")
-            .filter((el) => isEdit(el));
+            .filter((el) => isEdit(el))
+            .sort((a, b) => Number(a.center_y ?? 0) - Number(b.center_y ?? 0));
 
         const candidates = editFields.filter((el) => matchesHint(el));
 
@@ -479,9 +872,13 @@ export default function SmokeCheckPanel() {
             if (target) {
                 try {
                     await invokeActionTap(target.x, target.y);
-                    await sleep(150);
+                    await sleep(200);
+                    // Clear existing content before typing — Appium /keys APPENDS, so we
+                    // must select-all + delete first to avoid number-appending bugs.
+                    await invokeActionClearField();
+                    await sleep(100);
                 } catch {
-                    // ignore and try typing anyway
+                    // ignore — typing will still proceed
                 }
             }
 
@@ -496,9 +893,11 @@ export default function SmokeCheckPanel() {
                     const retryTarget = pickLikelyTextField(uiElements, null, text);
                     if (retryTarget) {
                         await invokeActionTap(retryTarget.x, retryTarget.y);
-                        await sleep(150);
+                        await sleep(200);
+                        await invokeActionClearField();
+                        await sleep(100);
                         await invokeActionInput(text);
-                        return { actionLabel: `input_text(retry)`, resultStatus: "ok" };
+                        return { actionLabel: `input_text(retry+clear)`, resultStatus: "ok" };
                     }
                 }
                 throw err;
@@ -568,12 +967,22 @@ export default function SmokeCheckPanel() {
         return () => { unlistenRef.current?.(); };
     }, []);
 
+    useEffect(() => {
+        void refreshScenarios();
+    }, []);
+
+    useEffect(() => {
+        if (!prefillScenarioId) return;
+        setScenarioMode("scenario");
+        void refreshScenarios(false, prefillScenarioId);
+    }, [prefillScenarioId, prefillScenarioSignal]);
+
     // ── Detect incomplete runs on startup (Requirement 30.3, 30.4) ──
     useEffect(() => {
         const detectIncompleteRuns = async () => {
             try {
                 const runIds = await listIncompleteRuns();
-                
+
                 if (runIds.length === 0) {
                     console.log("No incomplete runs detected");
                     return;
@@ -642,20 +1051,26 @@ export default function SmokeCheckPanel() {
         setResult(null);
         setErrMsg(null);
         stopRequestedRef.current = false;
-        
+
+        if (scenarioMode === "scenario" && !selectedScenario) {
+            setErrMsg("Select a scenario before starting scenario-based testing.");
+            setRunning(false);
+            return;
+        }
+
         // Reset seen element keys for new run
         seenElementKeys.current = [];
-        
+
         // Reset loop tracking for new run
         loopCount.current = 0;
         lastScreenHash.current = null;
-        
+
         // Reset no element count for new run
         noElementCount.current = 0;
-        
+
         // Reset completed screens for new run
         completedScreens.current = new Set();
-        
+
         // Reset recent actions for new run
         recentActionsRef.current = [];
 
@@ -675,6 +1090,117 @@ export default function SmokeCheckPanel() {
         let lastResult: string | null = null;
         let failureStreak = 0;
         let triageFindings: Array<Record<string, unknown>> = [];
+        let activeMode: "reach_home" | "explore" = "explore";
+        let scenarioGoalContext: Record<string, unknown> | null = null;
+        let scenarioGoalProgress: Record<string, unknown> | null = null;
+
+        // ── Multi-goal tracking ──────────────────────────────────────────────
+        let currentGoalIndex = 0;
+        let goalStepCount = 0;  // steps taken for current goal
+        const maxStepsPerGoal = selectedScenario?.constraints?.max_steps_per_goal ?? maxSteps;
+
+        if (scenarioMode === "scenario" && selectedScenario) {
+            const selectedCredentials = selectedScenario.credentials
+                ? {
+                    email: selectedScenario.credentials.email,
+                    password: selectedScenario.credentials.password,
+                    optional_otp_note: null,
+                }
+                : { email: "", password: "", optional_otp_note: null };
+
+            const homeMarkers = selectedScenario.goals[0]?.hints?.expected_screens ?? [];
+            const flowHints = selectedScenario.goals.map((g) => g.description);
+
+            try {
+                const bootstrap = await aiSessionBootstrap({
+                    app_name: selectedScenario.app_name,
+                    platform: "android",
+                    max_steps: maxSteps,
+                    credentials: selectedCredentials,
+                    home_markers: homeMarkers,
+                    flow_hints: flowHints,
+                    constraints: selectedScenario.constraints
+                        ? ({ ...selectedScenario.constraints } as Record<string, unknown>)
+                        : {},
+                    scenario: {
+                        id: selectedScenario.id,
+                        name: selectedScenario.name,
+                        description: selectedScenario.description,
+                        goals: selectedScenario.goals as unknown as Array<Record<string, unknown>>,
+                        credentials: selectedScenario.credentials ?? undefined,
+                    },
+                });
+
+                activeMode = bootstrap.mode;
+                const firstGoal = selectedScenario.goals[0] ?? null;
+                if (firstGoal) {
+                    scenarioGoalContext = firstGoal as unknown as Record<string, unknown>;
+                    scenarioGoalProgress = {
+                        steps_taken: 0,
+                        criteria_met: [],
+                        criteria_pending: firstGoal.success_criteria,
+                    };
+                }
+            } catch (err) {
+                setErrMsg(`Failed to bootstrap scenario: ${String(err)}`);
+                setRunning(false);
+                return;
+            }
+        }
+
+        /** Helper: run pre-navigation to a goal's start screen for ANY goal type */
+        const runPreNavToGoal = async (goal: ScenarioGoal, stepLabel: string) => {
+            setProgress(prev => [...prev, {
+                step: 0, total: maxSteps,
+                action: `🎯 [${stepLabel}] Navigating to: "${goal.description}"`,
+                status: "running", screenshot: null,
+            }]);
+            try {
+                const preNavSteps = await navigateToGoalStartScreen(
+                    goal,
+                    () => invokeGetUiSnapshot(),
+                    async (x, y) => { await invokeActionTap(x, y); },
+                    async () => { await invokeActionBack(); },
+                    (ms) => sleep(ms),
+                    (msg) => {
+                        console.log(msg);
+                        setProgress(prev => [...prev, {
+                            step: 0, total: maxSteps,
+                            action: msg, status: "running", screenshot: null,
+                        }]);
+                    },
+                );
+                if (preNavSteps > 0) {
+                    setProgress(prev => [...prev, {
+                        step: 0, total: maxSteps,
+                        action: `✓ [${stepLabel}] Start screen reached in ${preNavSteps} step(s)`,
+                        status: "running", screenshot: null,
+                    }]);
+                }
+            } catch (navErr) {
+                console.warn("Pre-navigation failed:", navErr);
+            }
+        };
+
+        // ── PRE-NAVIGATION: ALWAYS run for every scenario, infer keywords automatically ──
+        if (scenarioMode === "scenario" && selectedScenario) {
+            const firstGoal = selectedScenario.goals[0] ?? null;
+            if (firstGoal) {
+                // Build keyword-augmented goal so navigateToGoalStartScreen has keywords
+                // even when the scenario author didn't fill in start_screen_keywords.
+                const inferredKeywords = inferGoalNavKeywords(firstGoal);
+                const augmentedGoal: ScenarioGoal = {
+                    ...firstGoal,
+                    start_screen_keywords: inferredKeywords.length > 0
+                        ? inferredKeywords
+                        : (firstGoal.start_screen_keywords ?? []),
+                    // Auto-set start_nav_tap_label from description if not set
+                    start_nav_tap_label: firstGoal.start_nav_tap_label
+                        ?? inferredKeywords[0] ?? undefined,
+                };
+                await runPreNavToGoal(augmentedGoal, `Goal 1/${selectedScenario.goals.length}`);
+            }
+        }
 
         try {
             for (let step = 1; step <= maxSteps; step++) {
@@ -715,6 +1241,8 @@ export default function SmokeCheckPanel() {
                 let screenshotB64: string | null = null;
 
                 try {
+                    // Small sleep to ensure the UI is fully rendered and idle before screenshot
+                    await sleep(1200);
                     const vs = await invokeAiVisionScreenshot(step, hash);
                     stepScreenshotPath = vs.screenshot_path;
                     screenshotB64 = vs.screenshot_b64 ?? null;
@@ -803,8 +1331,7 @@ export default function SmokeCheckPanel() {
                     last_action: lastAction,
                     last_result: lastResult,
 
-                    // Start simple: explore mode; bootstrap can be layered in later.
-                    mode: "explore",
+                    mode: activeMode,
                     seen_hash_counts: seenHashCounts,
                     seen_element_keys: seenElementKeys.current,
                     recent_actions: recentActionsRef.current.slice(-10).map(r => r.action as Record<string, unknown>),
@@ -814,7 +1341,14 @@ export default function SmokeCheckPanel() {
 
                     // ai-engine planner expects w/h (run_step also accepts width/height).
                     screen_size: { w: snap.screen_size.width, h: snap.screen_size.height },
-                    credentials: null,
+                    credentials: scenarioMode === "scenario" && selectedScenario?.credentials
+                        ? {
+                            email: selectedScenario.credentials.email,
+                            password: selectedScenario.credentials.password,
+                        }
+                        : null,
+                    current_goal: scenarioGoalContext,
+                    goal_progress: scenarioGoalProgress,
 
                     runtime_signals: runtimeSignals,
                     overflow_detection: overflowDetection,
@@ -858,28 +1392,104 @@ export default function SmokeCheckPanel() {
                 let nextAction = (aiOut.next_action ?? {}) as any;
                 let type = String(nextAction?.type ?? "");
 
-                const sameHashCount = seenHashCounts[hash] ?? 1;
-                const swipeStreak = trailingSwipeCount(recentActionsRef.current.map(r => r.action as Record<string, unknown>));
-                const forcedTapAction = isSwipeAction(nextAction) && swipeStreak >= 1
-                    ? (() => {
-                        const tapTarget = pickTapFirstTarget(snap.ui_elements as any[], snap.screen_size);
-                        if (!tapTarget) return null;
-                        return {
-                            type: "tap_xy",
-                            params: { x: tapTarget.x, y: tapTarget.y },
+                // ── Goal advancement: track steps per goal, advance when exhausted ──
+                if (scenarioMode === "scenario" && selectedScenario) {
+                    goalStepCount++;
+                    const currentGoal = selectedScenario.goals[currentGoalIndex] ?? null;
+
+                    // Update goal progress context sent to AI
+                    if (currentGoal) {
+                        scenarioGoalContext = currentGoal as unknown as Record<string, unknown>;
+                        scenarioGoalProgress = {
+                            steps_taken: goalStepCount,
+                            criteria_met: [],
+                            criteria_pending: currentGoal.success_criteria,
                         };
-                    })()
+                    }
+
+                    // Advance to next goal when: AI says stop, or per-goal step budget exhausted
+                    const goalDone = (!aiOut.should_continue && currentGoalIndex < selectedScenario.goals.length - 1)
+                        || goalStepCount >= maxStepsPerGoal;
+
+                    if (goalDone && currentGoalIndex < selectedScenario.goals.length - 1) {
+                        const nextGoalIndex = currentGoalIndex + 1;
+                        const nextGoal = selectedScenario.goals[nextGoalIndex];
+                        setProgress(prev => [...prev, {
+                            step, total: maxSteps,
+                            action: `⏭ Goal ${currentGoalIndex + 1} done → starting Goal ${nextGoalIndex + 1}: "${nextGoal.description}"`,
+                            status: "running", screenshot: null,
+                        }]);
+                        currentGoalIndex = nextGoalIndex;
+                        goalStepCount = 0;
+
+                        // Pre-nav to the next goal's start screen
+                        const inferredKeywords = inferGoalNavKeywords(nextGoal);
+                        const augmentedNextGoal: ScenarioGoal = {
+                            ...nextGoal,
+                            start_screen_keywords: inferredKeywords.length > 0
+                                ? inferredKeywords
+                                : (nextGoal.start_screen_keywords ?? []),
+                            start_nav_tap_label: nextGoal.start_nav_tap_label
+                                ?? inferredKeywords[0] ?? undefined,
+                        };
+                        await runPreNavToGoal(augmentedNextGoal, `Goal ${nextGoalIndex + 1}/${selectedScenario.goals.length}`);
+
+                        // Update context with new goal after nav
+                        scenarioGoalContext = nextGoal as unknown as Record<string, unknown>;
+                        scenarioGoalProgress = {
+                            steps_taken: 0,
+                            criteria_met: [],
+                            criteria_pending: nextGoal.success_criteria,
+                        };
+                        // Reset loop tracking for fresh goal
+                        loopCount.current = 0;
+                        lastScreenHash.current = null;
+                        // Skip rest of this step iteration — refresh snapshot next loop
+                        continue;
+                    }
+
+                    // All goals done — stop
+                    if (goalDone && currentGoalIndex >= selectedScenario.goals.length - 1) {
+                        setProgress(prev => [...prev, {
+                            step, total: maxSteps,
+                            action: `✅ All ${selectedScenario.goals.length} goal(s) completed!`,
+                            status: "done", screenshot: null,
+                        }]);
+                        break;
+                    }
+                }
+
+                // Use currently active goal (not always goals[0]) for overrides
+                const activeGoalForOverride = scenarioMode === "scenario" && selectedScenario
+                    ? (selectedScenario.goals[currentGoalIndex] ?? null)
                     : null;
 
-                const forcedNavAction = !forcedTapAction && isLowValueAiAction(nextAction)
-                    ? buildNavigationRecoveryAction(
-                        step,
+                const sameHashCount = seenHashCounts[hash] ?? 1;
+                const goalDirectedAction = scenarioMode === "scenario"
+                    ? buildGoalDirectedNavigationAction(
+                        activeGoalForOverride,
                         sameHashCount,
                         snap.ui_elements as any[],
                         snap.screen_size,
                     )
                     : null;
-                if (forcedTapAction) {
+                const swipeStreak = trailingSwipeCount(recentActionsRef.current.map(r => r.action as Record<string, unknown>));
+                const forcedTapAction = isSwipeAction(nextAction) && swipeStreak >= 1
+                    ? (() => {
+                        const tapTarget = pickTapFirstTarget(snap.ui_elements as any[], snap.screen_size);
+                        if (!tapTarget) return null;
+                        return { type: "tap_xy", params: { x: tapTarget.x, y: tapTarget.y } };
+                    })()
+                    : null;
+
+                const forcedNavAction = !forcedTapAction && isLowValueAiAction(nextAction)
+                    ? buildNavigationRecoveryAction(step, sameHashCount, snap.ui_elements as any[], snap.screen_size)
+                    : null;
+
+                if (goalDirectedAction && (isLowValueAiAction(nextAction) || sameHashCount >= 2)) {
+                    nextAction = goalDirectedAction;
+                    type = String(nextAction.type);
+                } else if (forcedTapAction) {
                     nextAction = forcedTapAction;
                     type = String(nextAction.type);
                 } else if (forcedNavAction) {
@@ -901,6 +1511,15 @@ export default function SmokeCheckPanel() {
                         ui_elements: snap.ui_elements as any[],
                         screen_size: snap.screen_size
                     });
+                    
+                    // Post-action screenshot to bridge the timing gap
+                    await sleep(1200);
+                    try {
+                        await invokeActionScreenshot();
+                    } catch (e) {
+                        // ignore
+                    }
+
                     steps.push({
                         step_num: step,
                         action: exec.actionLabel,
@@ -914,7 +1533,7 @@ export default function SmokeCheckPanel() {
 
                     lastAction = nextAction;
                     lastResult = exec.resultStatus;
-                    
+
                     // Track action with proper ActionRecord structure
                     const actionRecord: ActionRecord = {
                         step,
@@ -926,7 +1545,7 @@ export default function SmokeCheckPanel() {
                         result: exec.resultStatus as any, // Map to ActionResult type
                         contributed_to_goal: false, // Will be updated when goal tracking is implemented
                     };
-                    
+
                     recentActionsRef.current.push(actionRecord);
                     // Keep only last 10 actions
                     if (recentActionsRef.current.length > 10) {
@@ -950,16 +1569,16 @@ export default function SmokeCheckPanel() {
 
                     // Track tapped elements
                     if (nextAction.type === "tap_xy" && snap.ui_elements) {
-                        const tappedX = Number(nextAction.params?.x ?? 0);
-                        const tappedY = Number(nextAction.params?.y ?? 0);
-                        
+                        const tappedX = Number(nextAction.params?.x ?? nextAction.params?.center_x ?? nextAction.params?.cx ?? 0);
+                        const tappedY = Number(nextAction.params?.y ?? nextAction.params?.center_y ?? nextAction.params?.cy ?? 0);
+
                         // Find the element that was tapped
                         for (const el of snap.ui_elements as any[]) {
                             if (el && typeof el === "object") {
                                 const elX = Number(el.center_x ?? 0);
                                 const elY = Number(el.center_y ?? 0);
                                 const distance = Math.sqrt(Math.pow(elX - tappedX, 2) + Math.pow(elY - tappedY, 2));
-                                
+
                                 // If tap is within 50px of element center, consider it tapped
                                 if (distance < 50) {
                                     const elementKey = `${el.resource_id ?? ""}::${el.bounds ?? ""}`;
@@ -1008,15 +1627,15 @@ export default function SmokeCheckPanel() {
                             goals_failed: 0,
                             total_findings: findings.map(f => ({
                                 ...f,
-                                severity: (f.severity === "error" || f.severity === "warn" || f.severity === "info") 
-                                    ? f.severity 
+                                severity: (f.severity === "error" || f.severity === "warn" || f.severity === "info")
+                                    ? f.severity
                                     : "info"
                             })) as any,
                             mode: "explore",
                             login_step: 0,
                             started_at: scenarioStartTime,
                         };
-                        
+
                         await saveExecutionState(runId, executionState);
                     } catch (stateErr) {
                         // State persistence is non-critical, log but don't break execution
@@ -1035,7 +1654,7 @@ export default function SmokeCheckPanel() {
                         screenshots: [],
                         actions_log: recentActionsRef.current,
                     };
-                    
+
                     const maxStepsResult = checkMaxStepsPerGoal(mockGoalProgress, maxSteps);
                     if (maxStepsResult.violated) {
                         const violationMsg = formatConstraintViolation(maxStepsResult);
@@ -1071,7 +1690,7 @@ export default function SmokeCheckPanel() {
             const finalStatus = stopRequestedRef.current ? "stopped" : "complete";
             let reportPath: string | null = null;
 
-            if (stepsDone >= 20) {
+            if (stepsDone > 0) {
                 try {
                     reportPath = await invokeWriteAiErroredScreensReport(
                         runId,
@@ -1180,6 +1799,164 @@ export default function SmokeCheckPanel() {
                     )}
                 </div>
 
+                {/* Scenario mode */}
+                <div style={{
+                    marginTop: "10px",
+                    padding: "10px 12px",
+                    borderRadius: "10px",
+                    border: "1px solid #1a2030",
+                    background: "#0B1018",
+                }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", marginBottom: "8px" }}>
+                        <span style={{ fontSize: "10px", color: "#6E7681", fontWeight: 700, letterSpacing: "0.5px", textTransform: "uppercase" }}>
+                            Scenario Mode
+                        </span>
+                        <span style={{ fontSize: "10px", color: scenarioMode === "scenario" ? success : warn, fontWeight: 700 }}>
+                            {scenarioMode === "scenario" ? "Scenario-Based" : "Autonomous"}
+                        </span>
+                    </div>
+
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "10px" }}>
+                        <button
+                            onClick={() => setScenarioMode("autonomous")}
+                            style={{
+                                border: `1px solid ${scenarioMode === "autonomous" ? accent : "#1f2632"}`,
+                                borderRadius: "8px",
+                                padding: "5px 10px",
+                                background: scenarioMode === "autonomous" ? "rgba(157,123,255,0.14)" : "#0F1520",
+                                color: scenarioMode === "autonomous" ? accent : "#8B949E",
+                                fontSize: "11px",
+                                fontWeight: 700,
+                                cursor: "pointer",
+                            }}
+                        >
+                            Autonomous
+                        </button>
+                        <button
+                            onClick={() => setScenarioMode("scenario")}
+                            disabled={scenarios.length === 0}
+                            style={{
+                                border: `1px solid ${scenarioMode === "scenario" ? accent : "#1f2632"}`,
+                                borderRadius: "8px",
+                                padding: "5px 10px",
+                                background: scenarioMode === "scenario" ? "rgba(157,123,255,0.14)" : "#0F1520",
+                                color: scenarios.length === 0 ? "#4a5568" : scenarioMode === "scenario" ? accent : "#8B949E",
+                                fontSize: "11px",
+                                fontWeight: 700,
+                                cursor: scenarios.length === 0 ? "not-allowed" : "pointer",
+                            }}
+                        >
+                            Scenario-Based
+                        </button>
+                        <button
+                            onClick={() => void refreshScenarios()}
+                            disabled={scenarioLoading}
+                            style={{
+                                border: "1px solid #1f2632",
+                                borderRadius: "8px",
+                                padding: "5px 10px",
+                                background: "#0F1520",
+                                color: scenarioLoading ? "#4a5568" : "#8B949E",
+                                fontSize: "11px",
+                                fontWeight: 700,
+                                cursor: scenarioLoading ? "not-allowed" : "pointer",
+                            }}
+                        >
+                            {scenarioLoading ? "Refreshing..." : "Refresh"}
+                        </button>
+                        <button
+                            onClick={() => void createScenarioFromUi()}
+                            disabled={scenarioBusy}
+                            style={{
+                                border: "1px solid rgba(63,185,80,0.25)",
+                                borderRadius: "8px",
+                                padding: "5px 10px",
+                                background: "rgba(63,185,80,0.08)",
+                                color: scenarioBusy ? "#4a5568" : success,
+                                fontSize: "11px",
+                                fontWeight: 700,
+                                cursor: scenarioBusy ? "not-allowed" : "pointer",
+                            }}
+                        >
+                            {scenarioBusy ? "Creating..." : "New Scenario"}
+                        </button>
+                    </div>
+
+                    {scenarioMode === "scenario" && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                            <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                                <select
+                                    value={selectedScenarioId}
+                                    onChange={(e) => setSelectedScenarioId(e.target.value)}
+                                    style={{
+                                        minWidth: "240px",
+                                        flex: "1 1 240px",
+                                        background: "#0F1520",
+                                        border: "1px solid #20252E",
+                                        borderRadius: "8px",
+                                        color: "#C9D1D9",
+                                        fontSize: "11px",
+                                        padding: "6px 8px",
+                                        outline: "none",
+                                        cursor: "pointer",
+                                    }}
+                                >
+                                    <option value="">Select a scenario...</option>
+                                    {scenarios.map((scenario) => (
+                                        <option key={scenario.id} value={scenario.id}>
+                                            {scenario.name} · {scenario.goals.length} goals
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            {selectedScenario ? (
+                                <div style={{
+                                    padding: "8px 10px",
+                                    borderRadius: "8px",
+                                    background: "rgba(157,123,255,0.06)",
+                                    border: "1px solid rgba(157,123,255,0.12)",
+                                    fontSize: "11px",
+                                    color: "#C9D1D9",
+                                    lineHeight: 1.5,
+                                }}>
+                                    <div style={{ fontWeight: 700, marginBottom: "3px", color: "#E6EDF3" }}>
+                                        {selectedScenario.name}
+                                    </div>
+                                    <div>{selectedScenario.description}</div>
+                                    <div style={{ color: "#8B949E", marginTop: "4px" }}>
+                                        App: {selectedScenario.app_name} · Goals: {selectedScenario.goals.length}
+                                        {selectedScenarioGoal ? ` · First goal: ${selectedScenarioGoal.type}` : ""}
+                                    </div>
+                                    <div style={{ color: "#8B949E", marginTop: "2px" }}>
+                                        The planner uses the first goal as context for scenario-based runs.
+                                    </div>
+                                </div>
+                            ) : (
+                                <div style={{ fontSize: "11px", color: "#6E7681", lineHeight: 1.5 }}>
+                                    Create a starter scenario or refresh the library, then select one here.
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {scenarioError && (
+                        <div style={{
+                            marginTop: "8px",
+                            padding: "8px 10px",
+                            borderRadius: "8px",
+                            background: "rgba(248,81,73,0.07)",
+                            border: "1px solid rgba(248,81,73,0.2)",
+                            fontSize: "11px",
+                            color: error,
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                        }}>
+                            {scenarioError}
+                        </div>
+                    )}
+                </div>
+
                 {/* Controls */}
                 <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                     {/* Steps control */}
@@ -1269,19 +2046,21 @@ export default function SmokeCheckPanel() {
 
                             <button
                                 onClick={handleStartAi}
+                                disabled={scenarioMode === "scenario" && !selectedScenario}
                                 style={{
                                     border: `1px solid ${accent}55`,
                                     borderRadius: "8px",
                                     padding: "5px 14px",
                                     background: "rgba(157,123,255,0.1)",
-                                    color: accent,
+                                    color: scenarioMode === "scenario" && !selectedScenario ? "#4a5568" : accent,
                                     fontSize: "11px",
                                     fontWeight: 700,
-                                    cursor: "pointer",
+                                    cursor: scenarioMode === "scenario" && !selectedScenario ? "not-allowed" : "pointer",
                                     transition: "background 0.15s",
+                                    opacity: scenarioMode === "scenario" && !selectedScenario ? 0.6 : 1,
                                 }}
                             >
-                                ▶ Start AI Test Run
+                                {scenarioMode === "scenario" ? "▶ Start Scenario Run" : "▶ Start AI Test Run"}
                             </button>
                         </div>
                     )}

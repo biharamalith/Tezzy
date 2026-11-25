@@ -29,6 +29,7 @@ fn main() {
 			commands::appium::action_back,
 			commands::appium::action_swipe,
 			commands::appium::action_input,
+			commands::appium::action_clear_field,
 			commands::appium::action_screenshot,
 			commands::appium::list_screenshots,
 			commands::explorer::get_ui_hierarchy,

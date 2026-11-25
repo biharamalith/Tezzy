@@ -14,6 +14,17 @@ export type SessionBootstrapInput = {
     home_markers: string[];
     flow_hints?: string[] | null;
     constraints?: Record<string, unknown>;
+    scenario?: {
+        id: string;
+        name: string;
+        description: string;
+        goals: Array<Record<string, unknown>>;
+        credentials?: {
+            email: string;
+            password: string;
+            optional_otp_note?: string | null;
+        } | null;
+    };
 };
 
 export type SessionBootstrapOutput = {
@@ -44,6 +55,8 @@ export type RunStepInput = {
 
     screen_size: { w: number; h: number } | { width: number; height: number };
     credentials?: Record<string, unknown> | null;
+    current_goal?: Record<string, unknown> | null;
+    goal_progress?: Record<string, unknown> | null;
 
     runtime_signals?: Array<Record<string, unknown>>;
     overflow_detection?: Record<string, unknown>;

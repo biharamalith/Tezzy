@@ -23,15 +23,17 @@ class VisionAnalystState(TypedDict):
 _SYSTEM_PROMPT = (
     "You are Tezzy Vision Analyst. You inspect Android app screenshots for UI rendering defects.\n"
     "Detect ALL of the following defect types if present:\n"
-    "  - overflow: Flutter yellow/black striped 'RenderFlex overflowed' ribbon on any edge\n"
+    "  - overflow: Flutter yellow/black diagonally striped warning ribbon/tape on any edge (layout overflow)\n"
     "  - clipping: widgets cut off at screen edges or parent boundaries\n"
     "  - truncation: text that is visibly cut with ellipsis or clipped mid-character\n"
     "  - misalignment: buttons, labels, or icons that are visibly off-center or misaligned\n"
     "  - off_screen: interactive elements partially or fully outside the visible area\n"
     "  - other: any other obvious rendering defect\n\n"
+    "CRITICAL PRIORITY - FLUTTER OVERFLOW:\n"
+    "Actively scan the absolute far right and bottom edges of the screen. If you see a bright yellow and black diagonally striped ribbon or box, this is a Flutter overflow error. IT MUST ALWAYS BE FLAGGED as an error. It often contains text like 'RIGHT OVERFLOWED BY...'. Do not ignore this under any circumstance.\n\n"
     "CONFIDENCE THRESHOLD: Only flag a defect if you are confident it is a real rendering error, "
     "not an intentional design choice. Minor pixel-level differences, intentional clipping for "
-    "aesthetic reasons, or truncation in clearly bounded labels should NOT be flagged.\n\n"
+    "aesthetic reasons, or truncation in clearly bounded labels should NOT be flagged (Exception: Flutter yellow/black overflow ribbons are ALWAYS defects).\n\n"
     "REGION PRECISION: For every issue, describe the region precisely using spatial landmarks "
     "e.g. 'bottom navigation bar, right side', 'top app bar, left of title', 'card #2 in list'. "
     "Do not use vague labels like 'bottom' or 'right' alone.\n\n"
@@ -39,7 +41,7 @@ _SYSTEM_PROMPT = (
 )
 
 _USER_PROMPT_TEMPLATE = (
-    "Inspect this screenshot carefully for UI rendering defects.\n\n"
+    "Inspect this screenshot carefully for UI rendering defects. Pay special attention to the edges of the screen for any yellow and black diagonally striped warning ribbons.\n\n"
     "step: {step}\n"
     "screen_hash: {screen_hash}\n\n"
     "Return a JSON object with exactly these keys:\n"
@@ -51,21 +53,24 @@ _USER_PROMPT_TEMPLATE = (
     "  description: concise description of the issue\n"
     "  severity: one of error | warn | info\n"
     "  region: precise spatial label e.g. 'bottom navigation bar, right side' — never null if visible\n\n"
-    "OVERFLOW DEFECTS: For any overflow issue, include in description: the exact pixel region where "
-    "the ribbon appears AND the visible text of the overflow message if readable "
-    "(e.g. 'RenderFlex overflowed by 42 pixels on the right').\n\n"
+    "OVERFLOW DEFECTS: For any overflow issue, describe where the yellow/black stripes appear and any visible text near it "
+    "(e.g. 'OVERFLOWED BY 42 PIXELS'). Look very closely at the right edge of the image.\n\n"
     "If no issues are found, return: {{\"issues\": [], \"has_issues\": false, \"summary\": \"No visual defects detected.\"}}"
 )
 
 
 async def _vision_analysis(state: VisionAnalystState) -> Dict[str, Any]:
+    
+    # 1. Grab the payload sent from Rust
     payload = state["input"]
-
+   # 2. Format the prompt (asking the AI to find visual defects 
+   # like clipping or overflow)
     prompt = _USER_PROMPT_TEMPLATE.format(
         step=payload.step,
         screen_hash=payload.screen_hash,
     )
-
+      # 3. Send the Prompt + the Base64 Image String 
+      # directly to the LLM
     llm = LLMClient()
     raw = await llm.chat_vision_json(
         system_prompt=_SYSTEM_PROMPT,

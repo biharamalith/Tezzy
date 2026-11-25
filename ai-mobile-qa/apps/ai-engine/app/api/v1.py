@@ -100,9 +100,24 @@ async def report_finalize(payload: FinalReportInput) -> FinalReportOutput:
 @router.post("/vision/analyze", response_model=VisionAnalysisOutput)
 async def vision_analyze(payload: VisionAnalysisInput) -> VisionAnalysisOutput:
     """Analyze a base64 screenshot with GPT-4o vision and return structured UI defect findings."""
-    graph = get_vision_analyst_graph()
-    result = await graph.ainvoke({"input": payload})
-    return result["output"]
+    try:
+        graph = get_vision_analyst_graph()
+        result = await graph.ainvoke({"input": payload})
+        return result["output"]
+    except Exception as exc:
+        logger.exception(f"Vision analyze failed for screen {payload.screen_hash}: {exc}")
+        return VisionAnalysisOutput(
+            has_issues=True,
+            summary=f"Vision analysis failed due to backend error: {str(exc)}",
+            issues=[
+                {
+                    "type": "other",
+                    "description": f"Backend API Error: {str(exc)}",
+                    "severity": "warn",
+                    "region": "system"
+                }
+            ]
+        )
 
 
 @router.post("/run/step", response_model=RunStepOutput)

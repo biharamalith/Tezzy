@@ -281,6 +281,30 @@ pub async fn input_text(
     Ok(())
 }
 
+/// Clears the currently focused input field by sending Ctrl+A then Delete key events.
+/// The caller must have already tapped the field to focus it before calling this.
+pub async fn clear_focused_field(
+    app: &AppHandle,
+    session_id: &str,
+    port: Option<u16>,
+) -> Result<(), String> {
+    let port = port.unwrap_or(DEFAULT_PORT);
+    let url = format!("http://127.0.0.1:{}/session/{}/keys", port, session_id);
+
+    emit_log(app, LogLevel::Info, "[appium-client] Clearing focused field (Ctrl+A + Delete)").ok();
+
+    // Send Ctrl+A to select all text, then the Delete key to remove it.
+    // Unicode Private Use Area keys are used by W3C WebDriver for special keys.
+    // Ctrl+A = '\u{E009}\u{0061}', then release Ctrl, then Delete = '\u{E017}'
+    let body = json!({
+        "text": "\u{E009}a\u{E000}\u{E017}",
+        "value": ["\u{E009}", "a", "\u{E000}", "\u{E017}"]
+    });
+    // Ignore errors — clear is best-effort; caller will still type new content
+    let _ = send_action_request(&url, &body).await;
+    Ok(())
+}
+
 pub async fn screenshot(
     app: &AppHandle,
     session_id: &str,
@@ -301,11 +325,12 @@ pub async fn screenshot_with_b64(
     dest_path: &std::path::Path,
     port: Option<u16>,
 ) -> Result<(String, String), String> {
+     // 1. Build the endpoint URL for Appium
     let port = port.unwrap_or(DEFAULT_PORT);
     let url = format!("http://127.0.0.1:{}/session/{}/screenshot", port, session_id);
 
     emit_log(app, LogLevel::Info, "[appium-client] Taking screenshot").ok();
-
+    // 2. Send the HTTP GET request to Appium to take the screenshot
     let response = get_shared_client()
         .get(&url)
         .send()
@@ -317,7 +342,7 @@ pub async fn screenshot_with_b64(
         let text = response.text().await.unwrap_or_default();
         return Err(format!("Screenshot failed [{}]: {}", status, text));
     }
-
+     // 3. Extract the Base64 string from Appium's JSON response
     let result: ValueResponse<String> = response
         .json()
         .await
@@ -337,7 +362,7 @@ pub async fn screenshot_with_b64(
         format!("[appium-client] Screenshot saved: {}", dest_path.display()),
     )
     .ok();
-
+    // (It saves the file to disk here, but keeps the raw string to pass to the AI)
     Ok((dest_path.to_string_lossy().to_string(), result.value))
 }
 

@@ -1,6 +1,9 @@
 use serde_json::Value;
 use tauri::AppHandle;
 
+use crate::core::events::{emit_log, LogLevel};
+use crate::drivers::ai_engine_server::ensure_ai_engine_running;
+
 pub fn get_ai_engine_base_url() -> String {
 	ai_engine_base_url()
 }
@@ -11,7 +14,15 @@ fn ai_engine_base_url() -> String {
 	raw.trim_end_matches('/').to_string()
 }
 
-async fn post_json(path: &str, payload: &Value) -> Result<Value, String> {
+fn is_connection_refused(err: &str) -> bool {
+	let err = err.to_lowercase();
+	err.contains("connection refused")
+		|| err.contains("actively refused")
+		|| err.contains("error trying to connect")
+		|| err.contains("failed to connect")
+}
+
+async fn post_json_once(path: &str, payload: &Value) -> Result<Value, String> {
 	let base = ai_engine_base_url();
 	let url = format!("{}{}", base, path);
 
@@ -39,32 +50,54 @@ async fn post_json(path: &str, payload: &Value) -> Result<Value, String> {
 		.map_err(|e| format!("AI engine returned non-JSON: {}\nRaw: {}", e, text))
 }
 
+async fn post_json_with_start(app: &AppHandle, path: &str, payload: &Value) -> Result<Value, String> {
+	match post_json_once(path, payload).await {
+		Ok(value) => Ok(value),
+		Err(err) if is_connection_refused(&err) => {
+			emit_log(app, LogLevel::Warn, format!("[ai-engine] {} - attempting local restart", err)).ok();
+			ensure_ai_engine_running(app).await?;
+			post_json_once(path, payload).await
+		}
+		Err(err) => Err(err),
+	}
+}
+
 /// Calls the AI engine /v1/run/step endpoint.
 #[tauri::command]
-pub async fn ai_run_step_cmd(_app: AppHandle, payload: Value) -> Result<Value, String> {
-	post_json("/run/step", &payload).await
+pub async fn ai_run_step_cmd(app: AppHandle, payload: Value) -> Result<Value, String> {
+	ensure_ai_engine_running(&app).await?;
+	post_json_with_start(&app, "/run/step", &payload).await
 }
 
 /// Calls the AI engine /v1/session/bootstrap endpoint.
 #[tauri::command]
-pub async fn ai_session_bootstrap_cmd(_app: AppHandle, payload: Value) -> Result<Value, String> {
-	post_json("/session/bootstrap", &payload).await
+pub async fn ai_session_bootstrap_cmd(app: AppHandle, payload: Value) -> Result<Value, String> {
+	ensure_ai_engine_running(&app).await?;
+	post_json_with_start(&app, "/session/bootstrap", &payload).await
 }
 
 /// Sends a base64-encoded screenshot to the AI engine /v1/vision/analyze endpoint.
 /// Returns the raw JSON response. Non-fatal: returns `None` on any error.
 pub async fn vision_analyze_screenshot(
+	app: &AppHandle,
 	screenshot_b64: &str,
 	step: u32,
 	screen_hash: &str,
 ) -> Option<Value> {
+	if let Err(err) = ensure_ai_engine_running(app).await {
+		emit_log(app, LogLevel::Warn, format!("[vision] AI engine unavailable: {}", err)).ok();
+		return None;
+	}
+
+  // 1. Package the massive Base64 string into a JSON payload
 	let payload = serde_json::json!({
 		"screenshot_b64": screenshot_b64,
 		"step": step,
 		"screen_hash": screen_hash,
 	});
-	match post_json("/vision/analyze", &payload).await {
-		Ok(v) => Some(v),
+	// 2. Fire the payload over the network to the Python AI engine at /vision/analyz
+	match post_json_with_start(app, "/vision/analyze", &payload).await {
+		Ok(v) => Some(v), //Success! The AI responded with its analysis.
 		Err(e) => {
 			eprintln!("[vision] analyze failed (non-fatal): {}", e);
 			None
@@ -132,7 +165,7 @@ pub async fn ai_vision_screenshot_cmd(
 	.ok();
 
 	// ── call vision analyst (non-fatal) ───────────────────────────────────
-	let vision = vision_analyze_screenshot(&raw_b64, step, &screen_hash).await;
+	let vision = vision_analyze_screenshot(&app, &raw_b64, step, &screen_hash).await;
 
 	if let Some(ref v) = vision {
 		let has_issues = v

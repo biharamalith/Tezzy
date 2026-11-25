@@ -1,3 +1,4 @@
+pub mod ai_engine_server;
 pub mod adb;
 pub mod apk;
 pub mod appium_client;

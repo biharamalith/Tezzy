@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from app.schemas.planner import CurrentGoal, GoalProgress
+
 
 PlannerMode = Literal["reach_home", "explore"]
 
@@ -32,6 +34,8 @@ class RunStepInput(BaseModel):
     # Planner context
     screen_size: Dict[str, int]
     credentials: Optional[Dict[str, Any]] = None
+    current_goal: Optional[CurrentGoal] = None
+    goal_progress: Optional[GoalProgress] = None
 
     # Optional signals from execution/vision (triage happens before planning next action)
     runtime_signals: List[Dict[str, Any]] = Field(default_factory=list)

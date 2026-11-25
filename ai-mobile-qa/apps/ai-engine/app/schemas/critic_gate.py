@@ -40,6 +40,8 @@ class CriticGateInput(BaseModel):
     failure_streak: int = Field(ge=0, default=0)
     mode: PlannerMode
     goal_constraints: Optional[GoalConstraints] = None
+    goal_type: Optional[str] = None  # e.g. "form_fill", "verify", "navigate" — used for no-escape enforcement
+    screen_height: Optional[int] = None  # used to detect bottom-nav taps
 
 
 Decision = Literal["approve", "reject"]

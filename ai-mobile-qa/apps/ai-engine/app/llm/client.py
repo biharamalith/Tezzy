@@ -5,10 +5,58 @@ from typing import Any, Dict, List, Optional
 from openai import AsyncOpenAI
 
 
+def _env_first(*keys: str) -> Optional[str]:
+	for key in keys:
+		value = os.getenv(key)
+		if value and value.strip():
+			return value.strip()
+	return None
+
+
 class LLMClient:
 	def __init__(self, *, api_key: Optional[str] = None, model: Optional[str] = None) -> None:
-		self._client = AsyncOpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+		resolved_api_key = api_key or _env_first("OPENAI_API_KEY", "OPENROUTER_API_KEY")
+		resolved_base_url = _env_first("OPENAI_BASE_URL", "OPENROUTER_BASE_URL")
+
+		# Auto-wire OpenRouter URL when a sk-or-v1 style key is present and
+		# no explicit base URL was configured.
+		if not resolved_base_url and resolved_api_key and resolved_api_key.startswith("sk-or-v1-"):
+			resolved_base_url = "https://openrouter.ai/api/v1"
+
+		default_headers: Optional[Dict[str, str]] = None
+		if resolved_base_url and "openrouter.ai" in resolved_base_url:
+			default_headers = {}
+			site_url = _env_first("OPENROUTER_SITE_URL")
+			app_name = _env_first("OPENROUTER_APP_NAME")
+			if site_url:
+				default_headers["HTTP-Referer"] = site_url
+			if app_name:
+				default_headers["X-Title"] = app_name
+			if not default_headers:
+				default_headers = None
+
+		self._client = AsyncOpenAI(
+			api_key=resolved_api_key,
+			base_url=resolved_base_url,
+			default_headers=default_headers,
+		)
 		self._model = model or os.getenv("TEZZY_LLM_MODEL", "gpt-4.1-mini")
+		
+		vision_api_key = _env_first("OPENAI_VISION_API_KEY", "OPENAI_API_KEY") or resolved_api_key
+		vision_base_url = _env_first("OPENAI_VISION_BASE_URL")
+		if not vision_base_url and resolved_base_url and "groq.com" not in resolved_base_url.lower():
+			vision_base_url = resolved_base_url
+			
+		self._vision_client = AsyncOpenAI(
+			api_key=vision_api_key,
+			base_url=vision_base_url,
+			default_headers=default_headers if vision_base_url == resolved_base_url else None,
+		)
+		
+		self._vision_model = os.getenv(
+			"TEZZY_VISION_MODEL",
+			"openai/gpt-4o" if resolved_base_url and "openrouter.ai" in resolved_base_url else "gpt-4o",
+		)
 
 	async def chat_json_messages(
 		self,
@@ -96,8 +144,8 @@ class LLMClient:
 			},
 		]
 
-		resp = await self._client.chat.completions.create(
-			model="gpt-4o",  # vision is not available on mini-class models
+		resp = await self._vision_client.chat.completions.create(
+			model=self._vision_model,
 			temperature=temperature,
 			response_format={"type": "json_object"},
 			timeout=timeout_s,
